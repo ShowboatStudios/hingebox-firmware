@@ -1,0 +1,229 @@
+# foma
+
+**F**m-**O**ne **M**akers' **A**ssistant
+
+Write firmware for the M-VAVE FM-1 with nothing installed but Docker. Edit one C file, hear it in the browser emulator
+as you save, install it on the FM-1 from the same page.
+
+```sh
+./fm1 dev          # open http://localhost:8000
+```
+
+That pulls the toolchain image ([konsumer/foma-toolchain](https://hub.docker.com/r/konsumer/foma-toolchain)) the first time, then builds your firmware and serves a page with:
+
+- **Emulator**: your code, compiled to WebAssembly, on a virtual FM-1 panel: the screen, keys, buttons, knobs, LEDs,
+  sound, MIDI in/out (Web MIDI), MIDI clock, settings, `print()` to a console. Save a file and it reloads; a compile
+  error shows on the page.
+- **Install**: puts your build (or any FM-1 `.fwsc`) on the FM-1 over USB, from Chrome or Edge.
+- **Rescue**: the USB rescue, finishing a cut-off install, going back to the official firmware.
+
+It is [Dinghy](https://github.com/zvenson/dinghy) made smaller: the same proven FM-1 platform (Felucca's, via SLOOP)
+under a smaller API, a Docker toolchain, and a web emulator in the spirit of
+[X0X](https://github.com/charlesvestal/fm1-x0x)'s.
+
+## Your firmware
+
+`src/main.c` (and any other `.c` in `src/`). Three functions, like an Arduino sketch:
+
+```c
+#include "fm1.h"
+
+static uint32_t phase;
+static volatile uint32_t inc;         /* written by loop(), read by audio() */
+
+void setup(void) {                       /* once, at power-on */
+  clear(BLACK);
+  text(80, 100, "HELLO", WHITE, FONT_BIG);
+}
+
+void loop(void) {                        /* over and over: read the panel, draw what changed */
+  inc = key_held(0) ? note_inc(KEY_FIRST_NOTE) : 0;
+}
+
+void audio(int32_t *out, uint32_t frames) {   /* the sound: add to out, L R L R, +-32767 */
+  for (uint32_t i = 0; i < frames; i++) {
+    phase += inc;
+    int32_t s = inc ? sine(phase) / 4 : 0;
+    out[2 * i] += s;
+    out[2 * i + 1] += s;
+  }
+}
+```
+
+Everything you can call is in [platform/fm1.h](platform/fm1.h): keys (`key_pressed`, `key_held`, ...), buttons
+(`BTN_PLAY`, ...), encoders (`encoder(ENC_KNOB1)`), LEDs, the screen (`clear`, `rect`, `line`, `pixel`, `text`),
+MIDI (`midi_read`, `midi_send`), `settings_load` / `settings_save`, `millis`, and sound helpers (`sine`, `note_inc`,
+`random32`).
+
+Name, version, package identity and build options: [firmware.json](firmware.json).
+
+### Build options
+
+Some parts of the platform are optional. They're all on unless `"options"` in `firmware.json` turns them off, and
+turning one off takes its code and memory out of the firmware:
+
+| Option       | What it adds                                                                                                                                                                            | Costs      |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `usb_audio`  | A computer or tablet can pick the FM-1 as a 44.1 kHz stereo output. `audio_in()` gives `audio()` that sound: play it, process it, record it.                                            | 10 KiB RAM |
+| `trs_midi`   | MIDI in on the 3.5 mm TRS jack (a TRS-to-DIN adapter for most gear), through `midi_read()`, which says where each message came from.                                                    | <1 KiB     |
+| `midi_clock` | One MIDI clock for `audio()`: its own tempo or the clock coming in, sent out over USB if you like. `clock_events()` gives each block's ticks, start and stop at the frame they fall on. | 1 KiB RAM  |
+| `bluetooth`  | BLE MIDI in and out ([below](#bluetooth-midi)). Off unless turned on; on by default with `"platform": "mvave"`, which also has audio from a phone or computer.                           | 30 KiB code, 6 KiB RAM |
+
+```json
+{ "name": "MY SYNTH", "version": "0.1", "identity": "FM-1_95", "options": { "usb_audio": false } }
+```
+
+In your code, `#if FOMA_USB_AUDIO` (and `FOMA_TRS_MIDI`, `FOMA_MIDI_CLOCK`, `FOMA_BLUETOOTH`) tells you what's in. The
+FM-1 has no MIDI out on the TRS jack, so that can't be an option. The emulator follows MIDI clock from Web MIDI; it
+has no USB audio input (`audio_in()` gives 0) and no Bluetooth (the calls answer "not ready").
+
+### Bluetooth MIDI
+
+`"options": { "bluetooth": true }` makes the FM-1 a Bluetooth MIDI device that a computer, phone or tablet connects
+to. `bt_enable(BT_MIDI)` (from `loop()`) starts it; until then none of it runs. The first one pauses the sound
+while the radio starts (its start-up has timing a long `audio()` would break), so call it early, from `setup()` or
+the first `loop()`. It shows up as your firmware's name
+and four hex digits (`FOMA FC75`), the same on every boot. MIDI from it comes in through `midi_read` (`MIDI_BLE`),
+clock and start / stop through the clock helper (`clock_follow(MIDI_BLE)`), and `midi_send` goes out over it too.
+`bt_status()` says whether it's advertising, connected or ready for MIDI. Notes held when the link drops get their
+note-offs.
+
+It can also connect out, to a Bluetooth MIDI controller or another FM-1: `ble_scan()` looks for 15 s, `ble_device(i)`
+names the BLE MIDI devices found (with a rough signal), `ble_device_addr(i)` gives one's address (keep it to find the
+device again later with `ble_find()`), `ble_connect(i)` connects, `ble_disconnect()` leaves it (a computer connected
+to the FM-1 stays). A link not made in a few seconds is worth leaving and trying again. One link at a time, no
+pairing. A clock from Bluetooth is placed by its senders' time stamps, so it comes out as evenly as it was sent.
+
+On Felucca's platform it's Henri David's Bluetooth stack from [Optimist](https://github.com/w0ts/optimist) with the
+radio drivers of [felucca-bsp](https://github.com/hugelton/felucca-bsp) (`platform/ble`, `platform/hal/fm1_ble*.h`,
+`platform/bt.c`): written from the Bluetooth specifications and measurements of the FM-1's radio, no JieLi library.
+It starts the radio with the FM-1's own calibration, as the stock firmware left it in flash (the defaults when it's
+gone), and measures the radio's VCO bands at every start (with another unit's, reception went bad seconds after the
+start). No pairing (macOS and iOS connect without it) and no audio. Tested on FM-1s with a Mac and with each other.
+
+To connect from a Mac: Audio MIDI Setup, Window > Show MIDI Studio, the Bluetooth button, then Connect.
+
+### Platforms: Felucca's, or M-VAVE's SDK (Bluetooth)
+
+`"platform"` in `firmware.json` picks what runs under your code on the FM-1. Your code and `fm1.h` stay the same.
+
+- **`felucca`** (the default): Felucca's platform, all of it source, with Felucca's flash layout, updater and USB rescue
+  (OCT- at power-on).
+- **`mvave`**: M-VAVE's official FM1 SDK, from [fm1_open](https://github.com/m-vave/fm1_open) (in `platform/mvave`):
+  their binary library runs FreeRTOS, USB, Bluetooth and the flash, and foma runs on top of it. It adds:
+  - **Bluetooth** (the `bluetooth` option): BLE MIDI in and out through `midi_read` (`MIDI_BLE`) and `midi_send`, with
+    the FM-1 as a BLE MIDI device phones and computers connect to, or connecting to a BLE MIDI controller itself
+    (`ble_central`, `ble_scan`, `ble_connect`); and audio from a phone or computer (`bt_audio_in()`). It's off until
+    `bt_enable(BT_MIDI | BT_AUDIO)`; `bt_status()` says what's connected. See `fm1.h`.
+  - **USB audio both ways**: the computer can record what the FM-1 plays.
+
+  The trade-offs:
+  - **Space**: M-VAVE's own instrument is inside the SDK's library and can't be left out, and their layout keeps 524
+    KiB of flash for user data (`settings_load` / `settings_save` use it). That leaves about **46 KiB** of flash for
+    your code and data (the build says how much), and about 160 KiB of RAM (no `POOL`: it's all one RAM).
+  - **Their layout and updater**: switching platform loses saved settings, the package identity is `FM-1_8` and six
+    digits (from the version), and there's no OCT- rescue: M-VAVE's workbench and the chip's boot ROM still are.
+  - **Tested only in an emulator** so far ([fm1-emu](https://github.com/joakimeriksson/fm1-emu), with fixes for this
+    SDK): the screen, keys, knobs, audio and TRS MIDI work there. Bluetooth, USB audio, saved settings and installing
+    haven't been tried on an FM-1 yet.
+  - **License**: `platform/mvave` is M-VAVE's: GPLv3 with their SDK linking exception, the library under their
+    binary terms (FM-1 devices only). See `platform/mvave/LICENSE.md` and `THIRD_PARTY.md`.
+
+```json
+{ "name": "MY SYNTH", "version": "0.1", "identity": "FM-1_95", "platform": "mvave" }
+```
+
+## The rules of the chip
+
+The FM-1 runs a JieLi AC791N. The emulator is forgiving, the chip is not; the build refuses what would break it.
+
+- **Integers only.** No FPU and no float library: `float` / `double` fail the FM-1 build (the emulator still runs, and
+  the page shows why). Use fixed point: Q15 levels, 32-bit phases.
+- **No 64-bit division**, no C library (`printf`, `malloc`, `sin`). 64-bit multiplication is fine.
+- **A division by zero does not trap** on the FM-1 (it gives a wrong value); in the emulator it crashes. Test divisors.
+- **`audio()` has 5.8 ms per 256 frames**, less in practice. No screen, no flash, no waiting in it. Share with `loop()`
+  through `volatile` variables, one writer each. `midi_send` works from both.
+- **`loop()` should return within a few ms**: the USB, the updater and the watchdog run between passes.
+- **Draw only what changed**: sending a full screen takes ~80 ms.
+- **Save settings when silent**: a flash erase stops the sound for ~50 ms. Never in a loop: flash wears out.
+- **Memory**: 96 KiB RAM for your variables; mark big buffers `POOL` (~200 KiB more). `const` tables live in flash.
+- The build also refuses constants that look like a chip-ROM address, and hardware register access outside
+  `platform/hal/`.
+
+## Commands
+
+|               |                                                                                      |
+| ------------- | ------------------------------------------------------------------------------------ |
+| `./fm1 dev`   | build, serve on http://localhost:8000 (`PORT=9000 ./fm1 dev`), rebuild on every save |
+| `./fm1 build` | `build/web/` (the site) and `build/NAME-VERSION.fwsc` (the package)                  |
+| `./fm1 flash` | install the build on the FM-1 over USB, as the page's Install does (below)           |
+| `./fm1 fmt`   | format: clang-format (C), prettier (web), ruff (python)                              |
+| `./fm1 shell` | a shell in the toolchain container                                                   |
+| `./fm1 image` | build the toolchain image from the `Dockerfile` here, instead of pulling it          |
+
+`./fm1 flash` runs on your computer, not in Docker (Docker on a Mac can't reach USB), and needs only `python3`
+(CoreMIDI on macOS, ALSA on Linux; not on Windows yet: use the page). `./fm1 flash` installs `build/web/firmware.fwsc`,
+`./fm1 flash FILE.fwsc` any package, `./fm1 flash --id` says what the FM-1 runs (`FM-1_000`: the USB rescue). Quit
+other apps that use the FM-1's MIDI port first. If an install is cut off, run it again: it finishes it. With more than
+one FM-1 on USB, `./fm1 flash --list` numbers them and `--port N` first picks one (`./fm1 flash --port 2`).
+`./fm1 flash --crash` shows the last crash the FM-1 recorded (the USB rescue answers it too); with Bluetooth,
+`--bt` shows the link and what the last scan found, and `--radio` which radio calibration it started with.
+
+Windows: `fm1.cmd dev` (Docker Desktop). Without the script:
+`docker run --rm -it --platform linux/amd64 -p 8000:8000 -v "$PWD:/work" konsumer/foma-toolchain python3 tools/build.py --dev 8000`.
+
+## Publishing
+
+Push to GitHub and set **Settings → Pages → Source: GitHub Actions**: every push to `main` builds the firmware and
+publishes the emulator and the installer, so anyone can try your firmware and install it with a link. A tag (`v0.2`)
+also makes a release with the `.fwsc`.
+
+The toolchain image has its own workflow, `.github/workflows/toolchain.yml`: when the `Dockerfile` changes on `main`
+(or when run by hand) it builds the image, checks that it builds the firmware, and pushes it to Docker Hub. It needs the
+repo secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
+
+**Using this as a template:** copy it (GitHub's "Use this template", or clone it), then make it yours once:
+
+```sh
+./fm1 new "MY SYNTH" --identity FM-1_96      # --repo URL too, if there is no git remote "origin" yet
+```
+
+That renames the firmware, points the page's Source link at your repo, writes your README, adds you to
+LICENSING.md, and removes what only foma needs (the `Dockerfile` and its workflow: your project uses the published
+`konsumer/foma-toolchain`).
+
+Pick your own `identity` in `firmware.json` before you share a build: the FM-1 and the installers tell firmwares apart
+by it. Taken so far: `900` SLOOP, `91N` Felucca, `93N` sloopDX, `97N` zp12, `98N` a Doom port, `99N` Dinghy; check the
+[FM-1 Firmware Hub](https://fm1.designburgapps.com).
+
+## When it goes wrong
+
+- **It crashes**: a red screen with the address (look it up in `build/fm1/firmware.dis`), then a restart. Crashing
+  twice at boot sends it to the USB rescue by itself.
+- **It won't start**: hold **OCT-** while switching on: the USB rescue (no sound, only the updater). Install from the
+  page.
+- **An install was cut off**: the FM-1 waits in update mode; the Rescue tab finishes it.
+- **Back to stock**: the Rescue tab installs M-VAVE's V15 (checked by its hash first).
+- **Nothing answers**: the chip's boot ROM can still be reached from a computer, not a browser: see the Rescue tab.
+
+Installing firmware is at your own risk.
+
+## Layout
+
+```
+src/main.c            your firmware
+firmware.json         name, version, identity
+platform/fm1.h        the API
+platform/fm1.c        the FM-1 side (boot, rescue, updater, USB, panel, screen, audio)
+platform/web.c        the emulator side (the same API, for WebAssembly)
+platform/common.c     shared: drawing, fonts, sound helpers
+platform/clock.c      shared: the MIDI clock (midi_clock)
+platform/hal, src, loader, gen, sdk   the Felucca platform, vendored (src/usb.c trimmed to MIDI and usb_audio)
+platform/mvave        the "mvave" platform: port.c (fm1.h on the SDK), sdk.c, board/ and sdk/ from M-VAVE's fm1_open
+tools/build.py        the build (in Docker), with the checks
+web/                  the page: emulator, installer, rescue
+```
+
+## License
+
+GPL-3.0-only. Credits and third-party parts: [LICENSING.md](LICENSING.md).
