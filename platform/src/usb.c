@@ -147,7 +147,30 @@ static const uint8_t STR1[] = {42, 3, 'H', 0, 0xFC, 0, 'g', 0, 'e', 0, 'l', 0, '
 static const uint8_t STR2[] = {30, 3, 'F', 0, 'e', 0, 'l', 0, 'u', 0, 'c', 0, 'c', 0, 'a', 0, ' ', 0, 'U', 0, 'p', 0,
                                'd', 0, 'a', 0, 't', 0, 'e', 0};
 #else
-static const uint8_t STR2[] = {16, 3, 'F', 0, 'e', 0, 'l', 0, 'u', 0, 'c', 0, 'c', 0, 'a', 0};
+/* the name the computer shows: APP_NAME, and the model on an SMK-37 build */
+#ifndef BOARD_SMK37
+#define BOARD_SMK37 0
+#endif
+#ifndef APP_NAME
+#define APP_NAME "DUMBMIDI"
+#endif
+#if BOARD_SMK37
+#ifndef SMK_MODEL
+#define SMK_MODEL "SMK-37 Pro"
+#endif
+#define USB_PRODUCT APP_NAME " " SMK_MODEL
+#else
+#define USB_PRODUCT APP_NAME
+#endif
+static uint8_t STR2[2u + 2u * (sizeof USB_PRODUCT - 1u)];
+static void str2_fill(void)
+{
+    uint32_t i;
+    for (i = 0; i + 1u < sizeof USB_PRODUCT; i++)
+        STR2[2u + 2u * i] = (uint8_t)USB_PRODUCT[i];
+    STR2[1] = 3;
+    STR2[0] = (uint8_t)sizeof STR2;
+}
 #endif
 
 static int get_desc(uint32_t wvalue, const uint8_t **d, uint16_t *l)
@@ -172,7 +195,14 @@ static int get_desc(uint32_t wvalue, const uint8_t **d, uint16_t *l)
             *l = sizeof STR1;
             return 1;
         case 2:
+#ifdef FELUCCA_LOADER
             *d = STR2;
+#else
+            if (!STR2[0]) {
+                str2_fill();
+            }
+            *d = STR2;
+#endif
             *l = sizeof STR2;
             return 1;
         default:

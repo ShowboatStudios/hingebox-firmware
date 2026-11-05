@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-/* What the FM-1 (fm1.c) and the emulator (web.c) share: the screen's framebuffer and drawing, and
- * the sound helpers. Included by both after felucca_font_t, FONT_S / FONT_L and libc.c. */
+/* What the platform (fm1.c) uses: the screen's framebuffer and drawing, and the sound helpers.
+ * Included after felucca_font_t, FONT_S / FONT_L and libc.c. */
 
 /* ---- the framebuffer: pixels stored byte-swapped, as the panel takes them, so a flush is one DMA
  * per strip. fb_y0..fb_y1 (exclusive) is what changed since the last flush */
@@ -137,6 +137,50 @@ int text_width(const char *s, int font) {
 }
 
 int text_height(int font) { return font_of(font)->h; }
+
+/* the same glyphs, every pixel scale x scale: a 64 px headline out of FONT_BIG (2x). Alpha is blended
+ * once per block, with the pixel already there. */
+int text_scale(int x, int y, const char *s, uint16_t color, int font, int scale) {
+  const felucca_font_t *f = font_of(font);
+  if (scale < 1) {
+    scale = 1;
+  }
+  if (scale > 4) {
+    scale = 4;
+  }
+  for (; *s; s++) {
+    uint32_t gi = font_glyph(f, (uint8_t)*s), w = f->bw[gi], bpr = (w + 1u) / 2u, gx, gy;
+    const uint8_t *gd = f->data + f->off[gi];
+    for (gy = 0; gy < f->h; gy++) {
+      int py = y + (int)gy * scale;
+      for (gx = 0; gx < w; gx++) {
+        int px = x - f->pad + (int)gx * scale;
+        uint32_t v = gd[gy * bpr + gx / 2u];
+        v = (gx & 1u) ? (v & 15u) : (v >> 4);
+        if (!v || (unsigned)px >= SCREEN_W || (unsigned)py >= SCREEN_H) {
+          continue;
+        }
+        uint16_t c = color;
+        if (v != 15u) {
+          c = blend(fb_swap(fb[py * SCREEN_W + px]), color, v);
+        }
+        rect(px, py, scale, scale, c);
+      }
+    }
+    x += f->adv[gi] * scale;
+  }
+  return x;
+}
+
+int text_scale_width(const char *s, int font, int scale) {
+  if (scale < 1) {
+    scale = 1;
+  }
+  if (scale > 4) {
+    scale = 4;
+  }
+  return text_width(s, font) * scale;
+}
 
 /* ---- sound helpers */
 int32_t sine(uint32_t phase) { /* a refined parabola, ~0.1 % */

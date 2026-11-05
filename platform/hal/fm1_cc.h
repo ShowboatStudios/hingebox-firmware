@@ -8,3 +8,15 @@
 #pragma once
 
 #define FM1_INLINE static inline __attribute__((always_inline))
+
+/* Target board: 0 = M-VAVE FM-1 (default), 1 = M-VAVE SMK-37 (Pro, Elite, MKE-P37; the same
+ * AC791N, SPL and update loader, a different panel wiring). tools/build.py sets it. */
+#ifndef BOARD_SMK37
+#define BOARD_SMK37 0
+#endif
+/* SMK_MODEL: the model name an SMK build reports (its package identity, its update loader's): the
+ * SMK-37 Pro, SMK-37 Elite and MKE-P37 are one keyboard under three names, and M-VAVE's updater only
+ * takes a unit's own factory package. tools/build.py sets it from --model. */
+#if BOARD_SMK37 && !defined(SMK_MODEL)
+#define SMK_MODEL "SMK-37 Pro"
+#endif

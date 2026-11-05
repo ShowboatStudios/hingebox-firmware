@@ -1,0 +1,6 @@
+{
+  "what": "A MIDI controller firmware for the M-VAVE SMK-37 (Pro, Elite, MKE-P37) and FM-1: a big chord display, control mapping on the screen, BLE and USB MIDI, RGB pads, arpeggiator, chord memory, scale lock and keyboard splits.",
+  "kind": "midi",
+  "author": "konsumer",
+  "image": "docs/screen.png"
+}

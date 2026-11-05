@@ -1,10 +1,12 @@
 {
-  "name": "FOMA",
-  "version": "0.1",
+  "name": "DUMBMIDI",
+  "version": "1.0.0",
   "identity": "FM-1_95",
+  "product": "FM-1_957",
   "options": {
-    "usb_audio": true,
-    "trs_midi": true,
-    "midi_clock": true
+    "usb_audio": false,
+    "trs_midi": false,
+    "midi_clock": false,
+    "bluetooth": true
   }
 }

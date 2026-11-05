@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-/* foma: everything your firmware can use. The same calls work on the FM-1 and in the browser
- * emulator. Your code supplies three functions:
+/* foma: everything your firmware can use. The same calls work on the FM-1 and the SMK-37.
+ * Your code supplies three functions:
  *
  *   void setup(void)                           once, at power-on
  *   void loop(void)                            over and over; keep each pass short (a few ms)
@@ -10,6 +10,16 @@
 #ifndef FM1_H
 #define FM1_H
 #include <stdint.h>
+
+/* Which panel this build runs on (tools/build.py --board): 0 the FM-1, 1 the SMK-37 (Pro, Elite,
+ * MKE-P37: one keyboard, three names). The calls below are the same on both; the ones that need the
+ * SMK's pads, faders, wheels, pedal or key velocity say so. */
+#ifndef BOARD_SMK37
+#define BOARD_SMK37 0
+#endif
+#if BOARD_SMK37 && !defined(SMK_MODEL)
+#define SMK_MODEL "SMK-37 Pro"
+#endif
 
 /* ---- build options: firmware.json "options" turns them on or off (all on unless it says otherwise). What an
  * option adds is only there when it is on: using it otherwise fails the build */
@@ -23,31 +33,73 @@
 #define FOMA_MIDI_CLOCK 1 /* midi_clock: one MIDI clock for audio(), its own or followed: clock_*() */
 #endif
 #ifndef FOMA_BLUETOOTH
-#define FOMA_BLUETOOTH 0 /* bluetooth: BLE MIDI, bt_*() / ble_*() (and audio from a phone: the "mvave" platform) */
+#define FOMA_BLUETOOTH 0 /* bluetooth: BLE MIDI, bt_*() / ble_*() */
 #endif
-/* FOMA_MVAVE: 1 when built on M-VAVE's FM1 SDK ("platform": "mvave" in firmware.json), else Felucca's platform */
-#ifndef FOMA_MVAVE
-#define FOMA_MVAVE 0
-#endif
-
 void setup(void);
 void loop(void);
-void audio(int32_t *out, uint32_t frames);
+void audio(int32_t* out, uint32_t frames);
 
 /* ---- time */
 #define SAMPLE_RATE 44100u
 uint32_t millis(void); /* ms since power-on */
 uint32_t micros(void); /* us, wraps every ~179 s: use differences */
 
-/* ---- keys: 27, bit 0 = F3 .. bit 26 = G5. "pressed" / "released" are for this pass of loop() */
+/* ---- keys: the FM-1's 27 (bit 0 = F3 .. bit 26 = G5); the SMK-37's whole 37-key keybed (key 0 = C3).
+ * "pressed" / "released" are for this pass of loop(); the SMK's keys carry the strike's velocity. */
 #define KEY_COUNT 27
-#define KEY_FIRST_NOTE 53 /* MIDI note of key 0 (F3) */
-uint32_t keys(void);      /* bit k: key k held */
+#define KEY_FIRST_NOTE 53 /* MIDI note of the FM-1's key 0 (F3) */
+uint32_t keys(void);      /* bit k: key k held (the FM-1's 27-key window) */
 int key_held(int k);
 int key_pressed(int k);
 int key_released(int k);
+int key_total(void);     /* 27 on the FM-1, 37 on the SMK */
+int key_base_note(void); /* MIDI note of key 0: 53 on the FM-1 (F3), 48 on the SMK (C3) */
+int key_all_held(int k);
+int key_all_pressed(int k);
+int key_all_released(int k);
+int key_velocity(int k); /* the velocity of key k's last press, 1..127 (the FM-1's keys: 0) */
 
-/* ---- buttons */
+/* ---- the SMK-37's 16 velocity pads with RGB LEDs (FM-1: none: pad_count() is 0) */
+int pad_count(void);
+int pad_held(int p);
+int pad_pressed(int p);
+int pad_velocity(int p);             /* the velocity of pad p's last hit, 1..127 */
+int pad_pressure(int p);             /* 0..127 while it is held (aftertouch) */
+void led_pad(int p, uint16_t color); /* RGB565; the platform sends what changed after loop() */
+void led_all_off(void);
+
+/* ---- the SMK-37's four faders (0..127), two wheels (raw 0..1023: 0 pitch, 1 mod) and the pedal jack
+ * (raw 0..1023). The FM-1: fader_count() and wheel_count() are 0, pedal_raw() is -1 */
+int fader_count(void);
+int fader(int i);
+int wheel_count(void);
+int wheel(int i);
+int pedal_raw(void);
+
+/* ---- buttons (SMK-37: the FM-1's on the buttons that mean the same; the printed names are in README) */
+#if BOARD_SMK37
+enum {
+  BTN_KNOB_BANK,
+  BTN_FADER_BANK,
+  BTN_LEFT,
+  BTN_RIGHT,
+  BTN_OCT_DOWN,
+  BTN_OCT_UP,
+  BTN_ARP,
+  BTN_LFO,  /* NOTE REPEAT */
+  BTN_SEL,  /* SCALE */
+  BTN_ENV,  /* PARA */
+  BTN_GLO,  /* GLOBE */
+  BTN_SAVE, /* BT */
+  BTN_HOME, /* PATCH */
+  BTN_EDIT, /* CHORD */
+  BTN_FX,
+  BTN_SEQ,
+  BTN_PLAY,
+  BTN_REC,
+  BTN_COUNT
+};
+#else
 enum {
   BTN_OCT_DOWN,
   BTN_OCT_UP,
@@ -65,12 +117,27 @@ enum {
   BTN_REC,
   BTN_COUNT
 };
+#endif
 uint32_t buttons(void); /* bit b: button b held */
 int button_held(int b);
 int button_pressed(int b);
 int button_released(int b);
 
-/* ---- encoders: detents turned since the last pass of loop(), + = clockwise */
+/* ---- encoders: detents turned since the last pass of loop(), + = clockwise. On the SMK-37 K1 is the
+ * MASTER (as the FM-1's pot); SELECT, ALGORITHM and PRESETS navigate; KNOB1..4 are the four the app maps */
+#if BOARD_SMK37
+enum {
+  ENC_MASTER,
+  ENC_SELECT,
+  ENC_ALGORITHM,
+  ENC_PRESETS,
+  ENC_KNOB1,
+  ENC_KNOB2,
+  ENC_KNOB3,
+  ENC_KNOB4,
+  ENC_COUNT
+};
+#else
 enum {
   ENC_SELECT,
   ENC_ALGORITHM,
@@ -81,12 +148,15 @@ enum {
   ENC_PRESETS,
   ENC_COUNT
 };
+#endif
 int32_t encoder(int e);
 uint32_t master_knob(void); /* the MASTER knob 0..1023; it is also the volume */
 
 /* ---- LEDs */
 void led_key(int k, int on);
 void led_button(int b, int on);
+void led_button_dim(int b, int on); /* the dim layer: "this button does something here" (a quarter lit on the SMK) */
+void led_key_dim(int k, int on);
 void led_backlight(int level); /* every key and button glows dimly: 0 off, 1 low, 2 full */
 
 /* ---- screen: 240 x 240, RGB565. Draw anywhere, any time in loop(); what changed is sent
@@ -103,9 +173,19 @@ void pixel(int x, int y, uint16_t color);
 void rect(int x, int y, int w, int h, uint16_t color);
 void frame(int x, int y, int w, int h, uint16_t color); /* outline */
 void line(int x0, int y0, int x1, int y1, uint16_t color);
-int text(int x, int y, const char *s, uint16_t color, int font); /* returns the x after it */
-int text_width(const char *s, int font);
+int text(int x, int y, const char* s, uint16_t color, int font); /* returns the x after it */
+int text_width(const char* s, int font);
 int text_height(int font);
+/* the same glyphs, each pixel scale x scale (1..4): FONT_BIG at 2 is a 64 px line */
+int text_scale(int x, int y, const char* s, uint16_t color, int font, int scale);
+int text_scale_width(const char* s, int font, int scale);
+/* anti-aliased Inter Tight (the performance screen): AA_SMALL 13 px, AA_BIG 44 px */
+enum { AA_SMALL, AA_MID, AA_BIG };
+int aa_text(int x, int y, const char* s, uint16_t color, int face);
+int aa_text_c(int x, int y, int w, const char* s, uint16_t color, int face);
+int aa_text_r(int xr, int y, const char* s, uint16_t color, int face);
+int aa_width(const char* s, int face);
+int aa_height(int face);
 
 /* ---- MIDI in over USB (and the TRS jack: trs_midi; BLE: bluetooth), out over USB (and BLE) (any channel; SysEx
  * belongs to the updater).
@@ -115,7 +195,7 @@ enum { MIDI_USB = 1,
        MIDI_TRS = 2,
        MIDI_BLE = 4,
        MIDI_ANY = 7 };
-int midi_read(uint8_t *status, uint8_t *d1, uint8_t *d2); /* 0: none; else where it came from: MIDI_USB, MIDI_TRS, MIDI_BLE */
+int midi_read(uint8_t* status, uint8_t* d1, uint8_t* d2); /* 0: none; else where it came from: MIDI_USB, MIDI_TRS, MIDI_BLE */
 void midi_send(uint8_t status, uint8_t d1, uint8_t d2);
 void midi_frame(uint32_t at); /* audio() only: the frame of this block the next midi_send calls fall on (Bluetooth
                                * MIDI stamps them with that time; USB has no time stamps). 0 when audio() starts */
@@ -140,15 +220,14 @@ void clock_tempo(uint32_t bpm100); /* its own tempo, BPM x 100 (12000: 120 BPM) 
 void clock_start(void);            /* start, continue, stop from the app (following: the other device's too) */
 void clock_continue(void);
 void clock_stop(void);
-int clock_events(const clock_event_t **ev); /* audio() only: this block's events; returns how many */
+int clock_events(const clock_event_t** ev); /* audio() only: this block's events; returns how many */
 uint32_t clock_bpm(void);                   /* BPM x 100: its tempo, or the followed clock's (0: none coming) */
 #endif
 
 #if FOMA_BLUETOOTH
 /* ---- Bluetooth (bluetooth). Off until bt_enable(). BLE MIDI comes in through midi_read (MIDI_BLE) and midi_send
- * goes out over it too. Phones and computers connect to the FM-1 (it shows up as a BLE MIDI device). The "mvave"
- * platform also has: a phone or computer playing into the FM-1 (bt_audio_in), and ble_central(1), which makes it
- * connect to a BLE MIDI controller instead: ble_scan(), then ble_device() / ble_connect(). From loop();
+ * goes out over it too. Phones and computers connect to the unit (it shows up as a BLE MIDI device). ble_central(1)
+ * makes it connect to a BLE MIDI controller instead: ble_scan(), then ble_device() / ble_connect(). From loop();
  * the calls return 0 when taken, -2 busy (try again), -3 not ready */
 enum { BT_AUDIO = 1,
        BT_MIDI = 2 };
@@ -168,47 +247,42 @@ typedef struct {
   uint8_t ble_count, ble_error;           /* devices found by ble_scan; the last failure (0 none) */
 } bt_status_t;
 int bt_enable(int features); /* BT_AUDIO | BT_MIDI, 0 off */
-void bt_status(bt_status_t *s);
+void bt_status(bt_status_t* s);
 int ble_central(int on);                                           /* 0: others connect to the FM-1; 1: it connects to a controller */
 int ble_scan(void);                                                /* central: 15 s of looking for BLE MIDI devices */
-int ble_device(int i, char name[25], int *rssi);                   /* 0: device i of the scan */
-int ble_device_addr(int i, uint8_t addr[6], int *random);          /* 0: device i's address, least significant octet first
-                                                                    * ("mvave": -1, not known) */
-int ble_find(const uint8_t addr[6], int random, const char *name); /* the scan's index of that device (by address, else
+int ble_device(int i, char name[25], int* rssi);                   /* 0: device i of the scan */
+int ble_device_addr(int i, uint8_t addr[6], int* random);          /* 0: device i's address, least significant octet first */
+int ble_find(const uint8_t addr[6], int random, const char* name); /* the scan's index of that device (by address, else
                                                                     * by name when name is not empty), -1: not seen */
 int ble_connect(int i);
 int ble_disconnect(void);         /* leave the device we connected to (a computer connected to us stays) */
 int ble_forget(void);             /* forget the BLE pairings */
-const int32_t *bt_audio_in(void); /* in audio(): this block from Bluetooth (as audio_in), or 0 */
+const int32_t* bt_audio_in(void); /* in audio(): this block from Bluetooth (as audio_in), or 0 */
 #endif
 
 #if FOMA_USB_AUDIO
 /* ---- audio from a computer or tablet over USB (usb_audio): the FM-1 is a 44.1 kHz stereo output it can pick.
  * In audio(): this block's frames, L R L R ..., +-32767 (process it, record it, add it to out), or 0 when nothing
  * plays. The platform doesn't play it itself */
-const int32_t *audio_in(void);
+const int32_t* audio_in(void);
 #endif
 
 /* ---- settings: up to SETTINGS_MAX bytes that survive power-off (three 4 KiB flash sectors, less a header). Saving stalls the sound for
  * ~50 ms a sector:
  * save when nothing plays, never in a loop (flash wears out) */
 #define SETTINGS_MAX 12276u
-int settings_load(void *p, uint32_t n); /* 0: loaded; else p is untouched */
-int settings_save(const void *p, uint32_t n);
+int settings_load(void* p, uint32_t n); /* 0: loaded; else p is untouched */
+int settings_save(const void* p, uint32_t n);
 
 /* ---- helpers for sound without floats */
 int32_t sine(uint32_t phase);          /* a full cycle over 2^32 -> -32767..32767 */
 uint32_t note_inc(int note);           /* phase step per frame of a MIDI note (0..127) at SAMPLE_RATE */
 uint32_t random32(void);               /* xorshift */
-void format_int(char *buf, int32_t v); /* decimal, buf of 12 */
-void print(const char *s);             /* to the emulator's console (nothing on the FM-1) */
+void format_int(char* buf, int32_t v); /* decimal, buf of 12 */
+void print(const char* s);             /* for debugging (nothing on the hardware) */
 
-/* big buffers (delay lines, samples): RAM is 96 KiB, the pool ~200 KiB more ("mvave": one RAM, POOL is ordinary)
+/* big buffers (delay lines, samples): RAM is 96 KiB, the pool ~200 KiB more
  *   static int16_t delay[48000] POOL; */
-#if defined(__wasm__) || FOMA_MVAVE
-#define POOL
-#else
 #define POOL __attribute__((section(".pool")))
-#endif
 
 #endif

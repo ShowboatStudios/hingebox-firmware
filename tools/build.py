@@ -1,55 +1,53 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-only
-"""Build everything from src/ (run it in the toolchain container: ./fm1 build).
+"""Build the firmware for every target board (run it in the toolchain container: ./fm1 build).
 
-  tools/build.py              build/web/: the site (emulator, installer, rescue) with
-                              firmware.wasm (the emulator) and firmware.fwsc (the FM-1 package)
-  tools/build.py --dev PORT   the same, then serve build/web on PORT and rebuild on every change
+  tools/build.py             FM-1 and the three SMK-37 models into build/*.fwsc (nothing else)
 
-The FM-1 part is Dinghy's / Felucca's build (Leo Kuroshita, Hügelton Instruments; zvenson):
-the app, the update loader, the checks that keep a build from bricking the FM-1, the package.
+Each package is complete: the app, the update loader and the flash image. Install one with
+mutant.cloud (or the stock updater / the family installer); there is no web emulator here.
+
+The FM-1 and SMK-37 parts are Dinghy's / Felucca's build (Leo Kuroshita, Hügelton Instruments;
+zvenson; the SMK-37 port: M. Geisler): the app, the update loader, the checks that keep a build
+from bricking the unit, the package.
 """
 
-import argparse
 import json
 import os
 import re
-import shutil
 import struct
 import subprocess
 import sys
-import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PLAT = ROOT / "platform"
 SRC = ROOT / "src"
-WEB = ROOT / "web"
 OUT = ROOT / "build"
-FW = OUT / "fm1"
-LDR = OUT / "loader"
-SITE = OUT / "web"
 sys.path.insert(0, str(ROOT / "tools"))
 import fm1pkg_make  # noqa: E402
 import lz4blk  # noqa: E402
-import mvpack  # noqa: E402
 
 TC = Path(os.environ.get("JIELI_TOOLCHAIN", "/opt/jieli/toolchain"))
 APP_XIP = 0x02000120  # app.bin offset 0 in the XIP map; the SPL jumps here
-APP_SLOT = fm1pkg_make.APP_SLOT
 LOADER_LOAD = 0x01C0A800
 LOADER_NAME = b"usb_hid_ota.bin"  # the file name the SPL looks for
 CFLAGS = ["-Os", "-ffunction-sections", "-fno-builtin", "-Wall", "-Wno-unused-function"]
 INCLUDES = ["-Iplatform", "-Iplatform/hal", "-Iplatform/src", "-Iplatform/gen"]
 LINE = re.compile(r"^\s*([0-9a-f]+):\s+((?:[0-9a-f]{2} )+)\s*\t(.*)$")
 
+# one keyboard, three names: M-VAVE's updater only takes a unit's own factory package back
+MODELS = {"pro": "SMK-37 Pro", "elite": "SMK-37 Elite", "mke": "MKE-P37"}
+MODEL_PID = {"pro": 0x0007, "elite": 0x0008, "mke": 0x0009}  # (the family's ids; the update loader is 0x0002)
+FM1_PID = 0x0006
+# firmware.json "options": the platform's parts you can leave out (all in unless set false), as FOMA_* in fm1.h
+OPTIONS = {"usb_audio": "FOMA_USB_AUDIO", "trs_midi": "FOMA_TRS_MIDI", "midi_clock": "FOMA_MIDI_CLOCK",
+           "bluetooth": "FOMA_BLUETOOTH"}
+
 
 class BuildError(Exception):
-  pass
+    pass
 
 
 def run(cmd):
@@ -80,15 +78,6 @@ def tc_all(*cmds):
     return list(ex.map(lambda c: tc(*c), cmds))
 
 
-# firmware.json "options": the platform's parts you can leave out (all in unless set false), as FOMA_* in fm1.h.
-# bluetooth (BLE MIDI) is off unless set true on "felucca" (platform/bt.c, the own stack), on unless set false on "mvave"
-OPTIONS = {"usb_audio": "FOMA_USB_AUDIO", "trs_midi": "FOMA_TRS_MIDI", "midi_clock": "FOMA_MIDI_CLOCK", "bluetooth": "FOMA_BLUETOOTH"}
-# firmware.json "platform": what runs under your code on the FM-1
-#   felucca  Felucca's platform (the default): all source, Felucca's flash layout and updater, the USB rescue
-#   mvave    M-VAVE's FM1 SDK (platform/mvave, its binary library): Bluetooth, M-VAVE's layout and updater
-PLATFORMS = ("felucca", "mvave")
-
-
 def sources():
   return sorted(SRC.glob("**/*.c"))
 
@@ -100,55 +89,23 @@ def config():
     raise BuildError('firmware.json: "version" must look like 0.1, 1.2.3 or 0.1-beta')
   if not re.fullmatch(r"[A-Z0-9 _.+-]{1,16}", c.get("name", "")):
     raise BuildError('firmware.json: "name" must be 1..16 capitals, digits, spaces or _.+-')
-  c["platform"] = c.get("platform", "felucca")
-  if c["platform"] not in PLATFORMS:
-    raise BuildError(f'firmware.json: "platform" must be one of {", ".join(PLATFORMS)}')
-  if c["platform"] == "mvave":  # M-VAVE's updater takes FM-1_8 and six digits: the version's major and minor
-    c["product"] = f"FM-1_8{int(m[1]) % 1000:03d}{int(m[2]) % 1000:03d}"
-  else:
-    c["product"] = c["identity"] + m[2][-1]  # FM-1_95 + the minor version's last digit
-    if not re.fullmatch(r"FM-1_\d{3}", c["product"]):
-      raise BuildError('firmware.json: "identity" must be FM-1_ and two digits (the third is your minor version)')
-  c["file"] = re.sub(r"[^a-z0-9.-]+", "-", c["name"].lower()).strip("-") or "firmware"
+  if not re.fullmatch(r"FM-1_\d{2}", c.get("identity", "")):
+    raise BuildError('firmware.json: "identity" must be FM-1_ and two digits')
   opts = c.get("options", {})
   bad = sorted(set(opts) - set(OPTIONS))
   if bad:
     raise BuildError(f"firmware.json: unknown option {', '.join(bad)} (there are: {', '.join(OPTIONS)})")
-  mv = c["platform"] == "mvave"
-  c["user_bytes"] = mvpack.USER_SIZE  # M-VAVE's layout (the SDK's flash API takes no other)
-  on = {k: bool(opts.get(k, mv if k == "bluetooth" else True)) for k in OPTIONS}
-  c["defines"] = [f"-D{OPTIONS[k]}={int(on[k])}" for k in OPTIONS] + [f"-DFOMA_MVAVE={int(mv)}"]
+  on = {k: bool(opts.get(k, True)) for k in OPTIONS}
+  if not on["bluetooth"]:
+    print("warning: bluetooth is off: this firmware's BLE MIDI output will not be in the build", file=sys.stderr)
+  minor = int(m[2]) % 10
+  c["version"] = m[1] + "." + m[2] + (m[3] or "") + (m[4] or "")
+  c["minor"] = minor
+  # a fixed FM-1 device id (firmware.json "product"), so a listing keeps one identity across releases
+  c["fm1_product"] = c.get("product") or f'{c["identity"]}{minor}'
+  c["on"] = on
+  c["file"] = re.sub(r"[^a-z0-9.-]+", "-", c["name"].lower()).strip("-") or "firmware"
   return c
-
-
-# ---- the emulator: the same code against platform/web.c, as WebAssembly
-
-
-def build_wasm(cfg):
-  SITE.mkdir(parents=True, exist_ok=True)
-  run(
-    [
-      "clang",
-      "--target=wasm32",
-      "-O2",
-      "-nostdlib",
-      "-fno-builtin",
-      "-Wall",
-      "-Wno-unused-function",
-      "-Wno-incompatible-library-redeclaration",
-      *INCLUDES,
-      f'-DAPP_NAME="{cfg["name"]}"',
-      f'-DAPP_VER="{cfg["version"]}"',
-      *cfg["defines"],
-      "-Wl,--no-entry",
-      "-Wl,-z,stack-size=1048576",
-      "-o",
-      rel(SITE / "firmware.wasm"),
-      "platform/web.c",
-      *[rel(s) for s in sources()],
-    ]
-  )
-  return (SITE / "firmware.wasm").stat().st_size
 
 
 # ---- the update loader
@@ -183,87 +140,99 @@ def ldr_wrap(image):
   return ldr_head(crc16(body), 0x20, len(body), 0x41, LOADER_NAME) + body
 
 
-def build_loader():
-  LDR.mkdir(parents=True, exist_ok=True)
+def build_loader(out, board_defs):
+  ldr = out / "loader"
+  ldr.mkdir(parents=True, exist_ok=True)
   src = PLAT / "loader"
   tc_all(
-    ("cc", "-c", src / "crt0_ldr.S", "-o", LDR / "crt0_ldr.o"),
-    ("cc", *CFLAGS, *INCLUDES, "-c", src / "loader.c", "-o", LDR / "loader.o"),
+    ("cc", "-c", src / "crt0_ldr.S", "-o", ldr / "crt0_ldr.o"),
+    ("cc", *CFLAGS, *INCLUDES, *board_defs, "-c", src / "loader.c", "-o", ldr / "loader.o"),
   )
-  elf = LDR / "loader.elf"
-  tc("ld", "--gc-sections", "-e", "_start", "-T", src / "loader.ld", LDR / "crt0_ldr.o", LDR / "loader.o", "-o", elf)
-  _, dis, hdr = tc_all(("objcopy", "-O", "binary", "-j", ".text", elf, LDR / "loader.bin"), ("objdump", "-d", elf), ("objdump", "-h", elf))
-  (LDR / "loader.dis").write_text(dis)
+  elf = ldr / "loader.elf"
+  tc("ld", "--gc-sections", "-e", "_start", "-T", src / "loader.ld", ldr / "crt0_ldr.o", ldr / "loader.o", "-o", elf)
+  _, dis, hdr = tc_all(("objcopy", "-O", "binary", "-j", ".text", elf, ldr / "loader.bin"), ("objdump", "-d", elf),
+                       ("objdump", "-h", elf))
+  (ldr / "loader.dis").write_text(dis)
   for ln in hdr.splitlines():  # the loader rewrites the flash: nothing may run from XIP
     p = ln.split()
     if len(p) > 4 and p[1].startswith(".") and int(p[3], 16) >= 0x02000000 and int(p[2], 16):
       raise BuildError(f"loader: section {p[1]} at {p[3]} is outside RAM")
-  image = (LDR / "loader.bin").read_bytes()
+  image = (ldr / "loader.bin").read_bytes()
   if not image or len(image) > 0x14000:
     raise BuildError("loader: image empty or too big")
-  return ldr_wrap(image)
+  ota = ldr_wrap(image)
+  (ldr / "ota.bin").write_bytes(ota)
+  return ota
 
 
 # ---- the app
 
 
-def build_app(cfg):
-  FW.mkdir(parents=True, exist_ok=True)
-  flags = [*CFLAGS, *INCLUDES, f'-DAPP_NAME="{cfg["name"]}"', f'-DAPP_VER="{cfg["version"]}"', f'-DFELUCCA_ID="{cfg["product"]}"', *cfg["defines"]]
+def build_app(cfg, out, board_defs, product):
+  app_slot = fm1pkg_make.APP_SLOT
+  flags = [*CFLAGS, *INCLUDES, f'-DAPP_NAME="{cfg["name"]}"', f'-DAPP_VER="{cfg["version"]}"',
+           f'-DFELUCCA_ID="{product}"', *cfg["defines"], *board_defs]
   objs, cmds = [], []
   for s in [PLAT / "crt0.S", PLAT / "hal/fm1_vec.S", PLAT / "hal/fm1_isr.S"]:
-    objs.append(FW / (s.stem + ".o"))
+    objs.append(out / (s.stem + ".o"))
     cmds.append(("cc", "-c", s, "-o", objs[-1]))
   for s in [PLAT / "fm1.c", *sources()]:
-    objs.append(FW / (("platform_" if s.parent == PLAT else "app_") + s.stem + ".o"))
+    objs.append(out / (("platform_" if s.parent == PLAT else "app_") + s.stem + ".o"))
     cmds.append(("cc", *flags, "-c", s, "-o", objs[-1]))
   tc_all(*cmds)
-  elf = FW / "firmware.elf"
+  elf = out / "firmware.elf"
+  ld = PLAT / "app.ld"
+  if app_slot != 0x8DFBC:  # another board's app slot (SMK-37): the same script, its XIP length
+    txt = ld.read_text()
+    if txt.count("LENGTH = 0x8DFBC") != 1:
+      raise BuildError("app.ld: the XIP LENGTH line was not found")
+    ld = out / "app.ld"
+    ld.write_text(txt.replace("LENGTH = 0x8DFBC", f"LENGTH = {app_slot:#X}".replace("0X", "0x")))
   try:
-    tc("ld", "--gc-sections", "-e", "_start", "-T", PLAT / "app.ld", *objs, "-o", elf)
+    tc("ld", "--gc-sections", "-e", "_start", "-T", ld, *objs, "-o", elf)
   except BuildError as e:
     raise BuildError(explain_link(str(e))) from None
   for sect in ("text.bin", "data.bin", "ramtext.bin"):
-    (FW / sect).unlink(missing_ok=True)
+    (out / sect).unlink(missing_ok=True)
   *_, syms, dis, rt = tc_all(
-    ("objcopy", "-O", "binary", "-j", ".text", elf, FW / "text.bin"),
-    ("objcopy", "-O", "binary", "-j", ".data", elf, FW / "data.bin"),
-    ("objcopy", "-O", "binary", "-j", ".ram_text", elf, FW / "ramtext.bin"),
+    ("objcopy", "-O", "binary", "-j", ".text", elf, out / "text.bin"),
+    ("objcopy", "-O", "binary", "-j", ".data", elf, out / "data.bin"),
+    ("objcopy", "-O", "binary", "-j", ".ram_text", elf, out / "ramtext.bin"),
     ("objdump", "-t", elf),
     ("objdump", "-d", elf),
     ("objdump", "-d", "-j", ".ram_text", elf),
   )
-  (FW / "firmware.dis").write_text(dis)
+  (out / "firmware.dis").write_text(dis)
 
   def symv(name):
     return int(re.search(r"^([0-9a-f]+) .*\s" + name + r"$", syms, re.M).group(1), 16)
 
-  img = bytearray((FW / "text.bin").read_bytes())
+  img = bytearray((out / "text.bin").read_bytes())
   # .ram_text and .data follow .text at their load addresses; crt0 copies them by words
   for sect, lname in (("ramtext.bin", "_rt_load"), ("data.bin", "_data_load")):
     load = symv(lname)
     if load % 4:
       raise BuildError(f"{lname} {load:#x} is not word aligned")
-    blob = (FW / sect).read_bytes() if (FW / sect).exists() else b""
+    blob = (out / sect).read_bytes() if (out / sect).exists() else b""
     if blob:
       if load - APP_XIP < len(img):
         raise BuildError(f"{lname} overlaps the image")
       img += b"\xff" * (load - APP_XIP - len(img))
       img += blob
   img += b"\xff" * (-len(img) % 4)
-  (FW / "firmware.bin").write_bytes(img)
+  (out / "firmware.bin").write_bytes(img)
   return bytes(img), syms, dis, rt
 
 
 LINK_HINTS = [
   (
     r"__(?:float|fix|extend|trunc)\w*|__(?:add|sub|mul|div|neg|cmp|eq|ne|lt|le|gt|ge|un)[sd]f[23]\b",
-    "float or double: the FM-1 has no FPU and no float library. Use integers (fixed point, e.g. Q15)",
+    "float or double: the chip has no FPU and no float library. Use integers (fixed point, e.g. Q15)",
   ),
-  (r"__u?(?:div|mod)di3\b", "a 64-bit division or modulo: there is no libgcc on the FM-1. Shift, or divide 32-bit values"),
+  (r"__u?(?:div|mod)di3\b", "a 64-bit division or modulo: there is no libgcc. Shift, or divide 32-bit values"),
   (
     r"\b(?:printf|sprintf|snprintf|malloc|free|strlen|strcpy|sin|cos|pow|sqrt)\b",
-    "there is no C library on the FM-1: see fm1.h for what there is (format_int, sine, ...)",
+    "there is no C library: see fm1.h for what there is (format_int, sine, ...)",
   ),
 ]
 
@@ -282,7 +251,7 @@ def explain_link(err):
   return "link failed:\n" + "\n".join(out) if out else err
 
 
-def check(img, syms, dis, rt):
+def check(img, syms, dis, rt, app_slot):
   errors, notes = [], []
   m = re.search(r"^([0-9a-f]+) .*\s_start$", syms, re.M)
   if not m or int(m.group(1), 16) != APP_XIP:
@@ -304,9 +273,9 @@ def check(img, syms, dis, rt):
     for v in re.findall(r"= (-?\d+) <|call -?\d+ <[^:>]*: ([0-9a-f]+) >", mm.group(3)):
       val = (int(v[0]) & 0xFFFFFFFF) if v[0] else int(v[1], 16) & 0xFFFFFFFF
       if 0xFFC00000 <= val < 0xFFD00000:
-        errors.append(f"{fn}: a constant {val:#010x} lies in the chip ROM (a call there bricks the FM-1): change the arithmetic so it never appears")
-  if len(img) > APP_SLOT:
-    errors.append(f"image {len(img)} B exceeds the app slot ({APP_SLOT} B)")
+        errors.append(f"{fn}: a constant {val:#010x} lies in the chip ROM (a call there bricks the unit)")
+  if len(img) > app_slot:
+    errors.append(f"image {len(img)} B exceeds the app slot ({app_slot} B)")
 
   def sym(name):
     mm = re.search(r"^([0-9a-f]+) .*\s" + name + r"$", syms, re.M)
@@ -314,7 +283,7 @@ def check(img, syms, dis, rt):
 
   ram = sym("_bss_end") - 0x01C08000
   pool = sym("_pool_end") - 0x01C20000
-  notes.append(f"code {len(img) // 1024} of {APP_SLOT // 1024} KiB, RAM {ram // 1024} of 96 KiB, pool {pool // 1024} of 336 KiB")
+  notes.append(f"code {len(img) // 1024} of {app_slot // 1024} KiB, RAM {ram // 1024} of 96 KiB, pool {pool // 1024} of 336 KiB")
   if ram > 96 * 1024:
     errors.append(f"RAM (.data + .bss) {ram} B > 96 KiB: make big arrays POOL or const")
   if pool > 0x54000:
@@ -323,17 +292,16 @@ def check(img, syms, dis, rt):
 
 
 # Every hardware register access lives in platform/hal/. Elsewhere (comments stripped):
-#  - no volatile pointer cast, except of a C object's address (`*(volatile T *)&x`);
-#  - no literal in a register or reserved window (core SFRs 0x10000-0x13FFF, SFC 0x40000-0x43FFF,
-#    GPIO/IOMAP 0x50000-0x51FFF, CPU 0x1EE0000-0x1EEFFFF, RAM top 0x01C7F000-, XIP 0x02000000-0x020FFFFF);
+#  - no volatile pointer cast, except of a C object's address;
+#  - no literal in a register or reserved window;
 #  - no inline asm, except the empty compiler barrier RING_PUBLISH();
-#  - no HAL register macro (a hal/ #define that is, or expands to, a volatile access).
+#  - no HAL register macro.
 MMIO_LIT = re.compile(r"\b0x0*(1[0-3][0-9a-f]{3}|4[0-3][0-9a-f]{3}|5[01][0-9a-f]{3}|1ee[0-9a-f]{4}|1c7f[0-9a-f]{3}|20[0-9a-f]{5})u?l?\b", re.I)
 MMIO_CAST = re.compile(r"\(\s*(?:const\s+)?volatile\b[^()]*\*\s*\)(?!\s*&)")
 MMIO_ASM = re.compile(r"\b(?:__asm__|asm)\b(?!\s+volatile\s*\(\s*\"\"\s*:::\s*\"memory\"\s*\))")
 
 
-def mmio_check(files=None):
+def mmio_check():
   def strip(s):
     s = re.sub(r"/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"), s, flags=re.S)
     return re.sub(r"//[^\n]*", "", s)
@@ -349,8 +317,8 @@ def mmio_check(files=None):
       break
     regs |= more
   errors = []
-  if files is None:
-    files = [*SRC.glob("**/*.[ch]"), *(PLAT / "src").glob("*.[ch]"), *(PLAT / "loader").glob("*.c"), PLAT / "fm1.c", PLAT / "common.c"]
+  files = [*SRC.glob("**/*.[ch]"), *(PLAT / "src").glob("*.[ch]"), *(PLAT / "loader").glob("*.c"), PLAT / "fm1.c",
+           PLAT / "common.c"]
   for f in sorted(files):
     for no, ln in enumerate(strip(f.read_text()).splitlines(), 1):
       where = f"{f.relative_to(ROOT)}:{no}"
@@ -364,179 +332,66 @@ def mmio_check(files=None):
   return errors
 
 
-# ---- the app on M-VAVE's FM1 SDK (platform/mvave): its compiler flags, linker script and package (fm1_open's
-# sdk/Build.ps1 and Package.cs). The SDK side (sdk.c, board/) sees the SDK's headers, the foma side (port.c, src/)
-# foma's fm1.h: the two share bridge.h
-
-MV = PLAT / "mvave"
-MV_FLAGS = [
-  "-integrated-as", "-mcpu=r3", "-mfprev1", "-Wuninitialized", "-Wno-invalid-noreturn", "-fno-common", "-fno-lto",
-  "-fallow-pointer-null", "-fprefer-gnu-section", "-femulated-tls", "-Wno-shift-negative-value", "-Wframe-larger-than=2560",
-  "-fms-extensions", "-fno-unwind-tables", "-ffunction-sections", "-fdata-sections", "-mllvm", "-pi32v2-large-program=true",
-  "-D__GCC_PI32V2__", "-O2", "-fwrapv", "-fno-fast-math", "-ffp-contract=off", "-Wall", "-Wno-unused-function",
-]  # fmt: skip
-MV_SDK_INC = [f"-I{rel(MV / d)}" for d in ("sdk/include", "sdk/include/libc", "sdk/config", "board", ".")]
-MV_FOMA_INC = ["-Iplatform", "-Iplatform/src", "-Iplatform/gen", f"-I{rel(MV)}"]
-MV_KEEP = ["connectivity_wl82_bluetooth_start", "audio_app_bluetooth_open", "bt_get_local_name", "bt_get_mac_addr"]
+# ---- targets
 
 
-def build_mvave(cfg):
-  out = OUT / "mvave"
+def target_defs(cfg, board, model):
+  """the compile defines of one package: the board, the model, its USB id and its package identity"""
+  model_name = MODELS[model] if board == "smk37" else None
+  minor = cfg["minor"]
+  if board == "smk37":
+    product = f"{model_name}_99{minor}"
+    pid = MODEL_PID[model]
+    defs = ["-DBOARD_SMK37=1", f'-DSMK_MODEL="{model_name}"']
+    app_defs = [*defs, f"-DFELUCCA_USB_PID=0x{pid:04X}"]
+    suffix = "-smk37" + ("" if model == "pro" else "-" + model)
+  else:
+    product = cfg["fm1_product"]
+    defs = []
+    app_defs = [f"-DFELUCCA_USB_PID=0x{FM1_PID:04X}"]
+    suffix = ""
+  return product, defs, app_defs, suffix
+
+
+def build_target(cfg, board, model="pro"):
+  product, board_defs, app_defs, suffix = target_defs(cfg, board, model)
+  fm1pkg_make.set_board(board)
+  if board == "smk37" and cfg["on"]["trs_midi"]:
+    raise BuildError("smk37: trs_midi must be off (its UART pin is a key-matrix row on this keyboard)")
+  out = OUT / ("smk37-" + model if board == "smk37" else "fm1")
   out.mkdir(parents=True, exist_ok=True)
-  common = [*MV_FLAGS, f'-DAPP_NAME="{cfg["name"]}"', f'-DAPP_VER="{cfg["version"]}"', *cfg["defines"]]
-  bid = cfg["product"].encode().ljust(32, b"\0")[:32]
-  (out / "build_identity.c").write_text(
-    '#include "layout.h"\n'
-    f"const struct fm1_firmware_layout fm1_layout = {{{cfg['user_bytes']}U,7U}};\n"
-    f"const unsigned char fm1_build_id[32] = {{{','.join(str(b) for b in bid)}}};\n"
-    f'const unsigned char fm1_update_identity[27] = "{cfg["product"]}";\n'
-  )
-  units = [(s, MV_SDK_INC) for s in (MV / "sdk.c", MV / "board/audio.c", MV / "board/device.c", MV / "board/panel.c", out / "build_identity.c")]
-  units += [(s, MV_FOMA_INC) for s in (MV / "port.c", *sources())]
-  objs, cmds = [], []
-  for i, (s, inc) in enumerate(units):
-    objs.append(out / f"{i}_{s.stem}.o")
-    cmds.append(("cc", *common, *inc, "-c", s, "-o", objs[-1]))
-  tc_all(*cmds)
-  ld = (MV / "sdk/config/linker.ld.in").read_text()
-  ld = ld.replace("@SBC_DECODER@", "sbc_decoder\n").replace("@ACL_TX_EXTRA@", " + 1024").replace("@ACL_RX_EXTRA@", " + 4096")
-  (out / "linker.ld").write_text(ld)
-  elf = out / "firmware.elf"
-  lib = MV / "sdk/lib"
-  try:
-    tc(
-      "ld", "-o", elf, *objs, "--sort-common", "--start-group", "--whole-archive", lib / "libfm1_engine.a", "--no-whole-archive",
-      lib / "libc.a", lib / "libcompiler_rt.a", "--end-group", "--gc-sections", "-T", out / "linker.ld", f"-Map={rel(out / 'firmware.map')}",
-      *[f"--undefined={k}" for k in MV_KEEP],
-    )  # fmt: skip
-  except BuildError as e:
-    raise BuildError(explain_link(str(e))) from None
-  parts = ("text", "data", "ram0_data", "cache_ram_data")
-  for p in parts:
-    (out / f"{p}.bin").unlink(missing_ok=True)
-  tc_all(*[("objcopy", "-O", "binary", "-j", f".{p}", elf, out / f"{p}.bin") for p in parts])
-  app = b"".join((out / f"{p}.bin").read_bytes() for p in parts if (out / f"{p}.bin").exists())
-
-  def size(sect):
-    m = re.search(r"^\s*\d+\s+\." + sect + r"\s+([0-9a-f]+)", tc("objdump", "-h", elf), re.MULTILINE)
-    return int(m.group(1), 16) if m else 0
-
-  try:
-    pkg, rep = mvpack.create(app, str(MV / "sdk/pack"), cfg["product"], cfg["user_bytes"])
-  except ValueError as e:
-    raise BuildError(str(e)) from None
-  ram = size("ram0_data") + size("ram0_bss")
-  notes = [f"M-VAVE SDK: image {len(app) // 1024} of {rep['room'] // 1024} KiB", f"RAM {ram // 1024} of 511 KiB (the rest is the SDK's heap)"]
-  return pkg, notes
-
-
-def build_fm1(cfg):
-  if cfg["platform"] == "mvave":
-    errors = mmio_check([*SRC.glob("**/*.[ch]")])
-    if errors:
-      raise BuildError("the FM-1 build is refused (it could crash or brick the FM-1):\n" + "\n".join("  " + e for e in errors))
-    pkg, notes = build_mvave(cfg)
-    (SITE / "firmware.fwsc").write_bytes(pkg)
-    (OUT / f"{cfg['file']}-{cfg['version']}.fwsc").write_bytes(pkg)
-    return notes
-  ota = build_loader()
-  img, syms, dis, rt = build_app(cfg)
-  errors, notes = check(img, syms, dis, rt)
+  ota = build_loader(out, board_defs)
+  img, syms, dis, rt = build_app(cfg, out, app_defs, product)
+  errors, notes = check(img, syms, dis, rt, fm1pkg_make.APP_SLOT)
   errors += mmio_check()
   if errors:
-    raise BuildError("the FM-1 build is refused (it could crash or brick the FM-1):\n" + "\n".join("  " + e for e in errors))
-  pkg = fm1pkg_make.ufw(fm1pkg_make.flash_image(img, fm1pkg_make.KEY), ota, cfg["product"])
-  (SITE / "firmware.fwsc").write_bytes(pkg)
-  (OUT / f"{cfg['file']}-{cfg['version']}.fwsc").write_bytes(pkg)
-  return notes
-
-
-# ---- the site
-
-
-def build_site():
-  SITE.mkdir(parents=True, exist_ok=True)
-  for f in WEB.iterdir():
-    if f.is_file():
-      shutil.copy(f, SITE / f.name)
+    raise BuildError("the build is refused (it could crash or brick the unit):\n" + "\n".join("  " + e for e in errors))
+  pkg = fm1pkg_make.ufw(fm1pkg_make.flash_image(img, fm1pkg_make.KEY), ota, product)
+  name = f'{cfg["file"]}{suffix}-{cfg["version"]}.fwsc'
+  (OUT / name).write_bytes(pkg)
+  return name, product, board, notes
 
 
 def build():
-  t0 = time.time()
-  info = {"id": str(time.time_ns()), "wasm": False, "fwsc": False, "log": ""}
-  log = []
-  try:
-    cfg = config()
-    info.update(name=cfg["name"], version=cfg["version"], identity=cfg["product"])
-    build_site()
+  cfg = config()
+  cfg["defines"] = [f"-D{OPTIONS[k]}={int(cfg['on'][k])}" for k in OPTIONS]
+  targets = [("fm1", "pro")] + [("smk37", m) for m in MODELS]
+  print(f'{cfg["name"]} {cfg["version"]}: {len(targets)} packages')
+  failed = 0
+  for board, model in targets:
     try:
-      n = build_wasm(cfg)
-      info["wasm"] = True
-      log.append(f"emulator  build/web/firmware.wasm  {n // 1024} KiB")
+      name, product, board, notes = build_target(cfg, board, model)
+      print(f"  ok    {name}  identity {product}  ({'; '.join(notes)})")
     except BuildError as e:
-      log.append(f"emulator: compile failed\n{e}")
-    if info["wasm"]:  # (a compile error is reported once)
-      try:
-        notes = build_fm1(cfg)
-        info["fwsc"] = True
-        log.append(f"FM-1      build/{cfg['file']}-{cfg['version']}.fwsc  identity {cfg['product']}  ({'; '.join(notes)})")
-      except BuildError as e:
-        log.append(f"FM-1: {e}")
-  except BuildError as e:
-    log.append(str(e))
-  info["ok"] = info["wasm"] and info["fwsc"]
-  info["log"] = "\n".join(log)
-  SITE.mkdir(parents=True, exist_ok=True)
-  (SITE / "build.json").write_text(json.dumps(info))
-  print(info["log"])
-  print(f"{'ok' if info['ok'] else 'FAILED'} in {time.time() - t0:.1f} s")
-  return info["ok"]
-
-
-# ---- dev: serve the site, rebuild on change
-
-
-class Quiet(SimpleHTTPRequestHandler):
-  def end_headers(self):
-    self.send_header("Cache-Control", "no-store")
-    super().end_headers()
-
-  def log_message(self, *a):
-    pass
-
-
-def snapshot():
-  files = [ROOT / "firmware.json", *SRC.rglob("*"), *PLAT.rglob("*"), *WEB.rglob("*")]
-  return {str(f): f.stat().st_mtime for f in files if f.is_file()}
-
-
-def dev(port):
-  build()
-  httpd = ThreadingHTTPServer(("0.0.0.0", port), partial(Quiet, directory=str(SITE)))
-  threading.Thread(target=httpd.serve_forever, daemon=True).start()
-  print(f"\nemulator, installer and rescue: http://localhost:{port}  (rebuilds when you save; ctrl-c stops)\n")
-  seen = snapshot()
-  try:
-    while True:
-      time.sleep(0.4)
-      now = snapshot()
-      if now != seen:
-        seen = now
-        print("\nchanged, rebuilding ...")
-        build()
-  except KeyboardInterrupt:
-    pass
+      failed += 1
+      print(f"  FAILED  {board} {model}: {e}")
+  print(f"{'ok' if not failed else f'{failed} failed'}")
+  return failed == 0
 
 
 def main():
-  ap = argparse.ArgumentParser()
-  ap.add_argument("--dev", type=int, metavar="PORT", help="serve build/web on PORT and rebuild on change")
-  a = ap.parse_args()
   if not (TC / "pi32v2/bin/clang").exists():
     raise SystemExit("no JieLi toolchain here: run this through ./fm1 (it uses the Docker image)")
-  if a.dev:
-    dev(a.dev)
-    return 0
   return 0 if build() else 1
 
 

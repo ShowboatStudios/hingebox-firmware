@@ -16,11 +16,17 @@
 #include "fm1_sys.h"
 #include "fm1_irq.h"
 #include "fm1_guard.h"
+#if BOARD_SMK37
+#include "smk_input.h" /* 37-key velocity keybed, buttons, 8 encoders, pads, faders, wheels, pedal */
+#else
 #include "fm1_input.h"
+#endif
 #include "fm1_timer.h"
 #include "fm1_lcd_hw.h"
 #include "fm1_audio.h"
-#include "fm1_adc.h"
+#if !BOARD_SMK37
+#include "fm1_adc.h" /* (SMK: smk_input.h stands in; K1 is the MASTER) */
+#endif
 #include "bootguard.h"
 
 #ifndef APP_NAME
@@ -61,16 +67,21 @@ static volatile uint8_t in_audio;   /* the audio interrupt is running */
 
 /* ---- flash: read anywhere; erase / program only the update's staging area and the settings sectors
  * (Felucca's globals, 0xFC000..0xFF000: below them are the update records, above the MAC key) */
+#if BOARD_SMK37
+#define SETTINGS_AT 0x0009D000u /* the stock VM's first three sectors: our settings (nothing else of it is used) */
+#define SETTINGS_END (0x0009D000u + 3u * 0x1000u)
+#else
 #define SETTINGS_AT 0x000FC000u
 #define SETTINGS_END 0x000FF000u
+#endif
 #define FL_RANGE_OK(off, n) (FL_IN(off, n, FL_OTA_LO, FL_OTA_HI) || FL_IN(off, n, SETTINGS_AT, SETTINGS_END))
 #if FOMA_BLUETOOTH
 #define FL_UID /* the flash's unique ID: the Bluetooth address */
 #endif
 #include "fm1_flash.h"
 static uint8_t flash_ok;
-static int st_read(uint32_t off, void *dst, uint32_t n) {
-  uint8_t *d = dst;
+static int st_read(uint32_t off, void* dst, uint32_t n) {
+  uint8_t* d = dst;
   while (n) {
     uint32_t k = n > 256u ? 256u : n, f = irq_save();
     int rc = FL_FAR(fl_read_ram)(off, d, k);
@@ -86,8 +97,12 @@ static int st_read(uint32_t off, void *dst, uint32_t n) {
 }
 
 static uint8_t recovery_active;
+#if BOARD_SMK37
+#define OTA_IDENTITY (recovery_active ? SMK_MODEL "_000" : FELUCCA_ID)
+#else
 #define OTA_IDENTITY (recovery_active ? "FM-1_000" : FELUCCA_ID)
-static void platform_frame(uint32_t cmd, const uint8_t *b, uint32_t n);
+#endif
+static void platform_frame(uint32_t cmd, const uint8_t* b, uint32_t n);
 #define OTA_MORE platform_frame
 #include "ota.c"
 static void recovery_poll(void);
@@ -106,15 +121,15 @@ static int ota_erase(uint32_t off) {
   }
   return fl_erase4k(off, &took);
 }
-static int ota_prog(uint32_t off, const void *p, uint32_t n) {
+static int ota_prog(uint32_t off, const void* p, uint32_t n) {
   if (!ota_in_area(off, n)) {
     return -8;
   }
   return fl_write(off, p, n);
 }
-static int ota_fread(uint32_t off, void *p, uint32_t n) { return st_read(off, p, n); }
+static int ota_fread(uint32_t off, void* p, uint32_t n) { return st_read(off, p, n); }
 static void ota_show(uint32_t step, int32_t code) {
-  static const char *const STEP[] = {"", "PACKAGE", "CHECK HEAD", "LOADER", "CONFIRM", "RESTART"};
+  static const char* const STEP[] = {"", "PACKAGE", "CHECK HEAD", "LOADER", "CONFIRM", "RESTART"};
   if (recovery_active) {
     return;
   }
@@ -126,7 +141,7 @@ static void ota_show(uint32_t step, int32_t code) {
     draw_text_box(0, 124, 240, &FONT_S, code == 1 ? "DRY RUN OK" : "FAILED", C_WHITE, 1);
   }
 }
-static void ota_commit(const uint8_t *parm) {
+static void ota_commit(const uint8_t* parm) {
   bootguard_clear(&bootguard);
   usb_detach();
   fm1_delay_ms(30);
@@ -143,7 +158,7 @@ static void ota_commit(const uint8_t *parm) {
  * BLE start-up step << 8. 0x13, the BLE breadcrumb (fm1_ble_rf.h, 0s without Bluetooth): now, irqs, op, gop, addr,
  * stop, the crash's uptime_ms, etm[0]. With Bluetooth: 0x14 [k], the radio records the last start used (bt.c
  * bt_rf_kept) from k * 32; 0x15, the link (bt.c bt_report); 0x16 [i], device i of the scan; 0x19, our address */
-static void platform_frame(uint32_t cmd, const uint8_t *b, uint32_t n) {
+static void platform_frame(uint32_t cmd, const uint8_t* b, uint32_t n) {
   if ((cmd == 0x12u || cmd == 0x13u) && !n) {
     uint32_t w[8] = {0}, step = 0;
     uint8_t o[32];
@@ -179,7 +194,7 @@ static void platform_frame(uint32_t cmd, const uint8_t *b, uint32_t n) {
   if (cmd == 0x14u && n == 1u && b[0] < 4u) { /* the radio records the last start used (bt.c bt_rf_kept): 32 bytes at b[0] * 32 */
     uint8_t o[32];
     for (uint32_t i = 0; i < 32u; i++) {
-      o[i] = ((const volatile uint8_t *)&bt_rf_kept)[b[0] * 32u + i];
+      o[i] = ((const volatile uint8_t*)&bt_rf_kept)[b[0] * 32u + i];
     }
     ota_send_msg(cmd, o, sizeof o);
     return;
@@ -188,8 +203,9 @@ static void platform_frame(uint32_t cmd, const uint8_t *b, uint32_t n) {
   (void)b, (void)n;
 }
 
-/* ---- the screen, the sound helpers (shared with the emulator) */
+/* ---- the screen, the sound helpers */
 #include "common.c"
+#include "aatext.c" /* Inter Tight: the performance screen's chord and notes */
 
 static void screen_flush(void) {
   int y;
@@ -207,7 +223,7 @@ static void screen_flush(void) {
 /* ---- settings: [magic][length][crc32] then the bytes, across up to three 4 KiB sectors */
 #define SETTINGS_MAGIC 0x414D4F46u /* "FOMA" */
 _Static_assert(SETTINGS_MAX + 12u <= SETTINGS_END - SETTINGS_AT, "the settings must fit their sectors");
-static uint32_t crc32(uint32_t c, const uint8_t *p, uint32_t n) {
+static uint32_t crc32(uint32_t c, const uint8_t* p, uint32_t n) {
   uint32_t k;
   while (n--) {
     c ^= *p++;
@@ -217,7 +233,7 @@ static uint32_t crc32(uint32_t c, const uint8_t *p, uint32_t n) {
   }
   return c;
 }
-int settings_load(void *p, uint32_t n) {
+int settings_load(void* p, uint32_t n) {
   uint8_t buf[256]; /* the flash driver wants RAM */
   uint32_t h[3], c = 0xFFFFFFFFu;
   if (!flash_ok || n > SETTINGS_MAX || st_read(SETTINGS_AT, h, sizeof h) || h[0] != SETTINGS_MAGIC || h[1] != n) {
@@ -235,7 +251,7 @@ int settings_load(void *p, uint32_t n) {
   }
   return st_read(SETTINGS_AT + sizeof h, p, n) ? -1 : 0;
 }
-int settings_save(const void *p, uint32_t n) { /* p is in RAM (the flash driver wants it) */
+int settings_save(const void* p, uint32_t n) { /* p is in RAM (the flash driver wants it) */
   uint32_t h[3] = {SETTINGS_MAGIC, n, 0}, took;
   int rc;
   if (!flash_ok || n > SETTINGS_MAX) {
@@ -250,11 +266,20 @@ int settings_save(const void *p, uint32_t n) { /* p is in RAM (the flash driver 
   if ((rc = fl_write(SETTINGS_AT + sizeof h, p, n)) != 0) {
     return rc;
   }
-  return fl_write(SETTINGS_AT, (const uint8_t *)h, sizeof h); /* the header last: a cut save stays invalid */
+  return fl_write(SETTINGS_AT, (const uint8_t*)h, sizeof h); /* the header last: a cut save stays invalid */
 }
+#if BOARD_SMK37
+/* the factory key / pad velocity curves (USRTRIM 0xC1000, read only; smk_input.h checks them, else its defaults) */
+static void smk_trim_read(void) {
+  static uint8_t rec[0x22Cu];
+  if (flash_ok && !st_read(SMK_TRIM_FLASH, rec, sizeof rec)) {
+    smk_trim_load(rec);
+  }
+}
+#endif
 
 /* ---- MIDI in from USB (cable 0) and the TRS jack (cable 1); out over USB, from loop() or audio() */
-int midi_read(uint8_t *status, uint8_t *d1, uint8_t *d2) {
+int midi_read(uint8_t* status, uint8_t* d1, uint8_t* d2) {
   uint32_t pk;
   if (mi_r == mi_w) {
     return 0;
@@ -291,13 +316,57 @@ uint32_t millis(void) { return fm1_ms; }
 uint32_t micros(void) { return fm1_micros(); }
 
 /* ---- the panel, as seen by one pass of loop() */
+#define KEY_ALL_MAX 37
 static uint32_t in_keys, in_kp, in_kr, in_btn, in_bp, in_br, in_master = 512;
 static int32_t in_enc[ENC_COUNT];
+static uint64_t in_all_keys, in_all_kp, in_all_kr;
+static uint8_t in_key_vel[KEY_ALL_MAX];
+static uint32_t in_pad_held, in_pad_press, in_pad_vel[16], in_pad_pressure[16];
+
 static void input_snapshot(void) {
   uint32_t now = fm1_in.notes, taps = fm1_input_note_edges(), rel, e;
   in_kp = taps | (now & ~in_keys);
   in_kr = (in_keys & ~now) | (taps & ~now);
   in_keys = now;
+#if BOARD_SMK37
+  { /* the whole 37-key keybed: its press edges and strikes' velocities (smk_input.h keeps them) */
+    uint64_t all = fm1_in.keys;
+    in_all_kp = all & ~in_all_keys;
+    in_all_kr = in_all_keys & ~all;
+    for (uint32_t k = 0; k < 37u; k++) {
+      if (in_all_kp >> k & 1u) {
+        in_key_vel[k] = fm1_in.key_vel[k];
+      }
+    }
+    in_all_keys = all;
+  }
+  in_pad_press = 0;
+  {
+    int32_t ev;
+    while ((ev = smk_pad_take()) >= 0) { /* pad << 8 | velocity, 0 = release */
+      uint32_t pad = (uint32_t)ev >> 8, v = (uint32_t)ev & 0xFFu;
+      if (pad >= 16u) {
+        continue;
+      }
+      if (v) {
+        if (!(in_pad_held >> pad & 1u)) {
+          in_pad_press |= 1u << pad;
+        }
+        in_pad_held |= 1u << pad;
+        in_pad_vel[pad] = v;
+      } else {
+        in_pad_held &= ~(1u << pad);
+      }
+    }
+    for (e = 0; e < 16u; e++) {
+      in_pad_pressure[e] = in_pad_held >> e & 1u ? fm1_in.pad_press[e] : 0u;
+    }
+  }
+#else
+  in_all_keys = now;
+  in_all_kp = in_kp;
+  in_all_kr = in_kr;
+#endif
   in_bp = fm1_input_edges(&rel);
   in_br = rel;
   in_btn = fm1_in.buttons;
@@ -309,6 +378,57 @@ uint32_t keys(void) { return in_keys; }
 int key_held(int k) { return (unsigned)k < KEY_COUNT && (in_keys >> k & 1u); }
 int key_pressed(int k) { return (unsigned)k < KEY_COUNT && (in_kp >> k & 1u); }
 int key_released(int k) { return (unsigned)k < KEY_COUNT && (in_kr >> k & 1u); }
+int key_total(void) { return BOARD_SMK37 ? 37 : KEY_COUNT; }
+int key_base_note(void) { return BOARD_SMK37 ? 48 : KEY_FIRST_NOTE; }
+int key_all_held(int k) { return (unsigned)k < (unsigned)key_total() && (in_all_keys >> k & 1u); }
+int key_all_pressed(int k) { return (unsigned)k < (unsigned)key_total() && (in_all_kp >> k & 1u); }
+int key_all_released(int k) { return (unsigned)k < (unsigned)key_total() && (in_all_kr >> k & 1u); }
+int key_velocity(int k) { return (unsigned)k < KEY_ALL_MAX ? in_key_vel[k] : 0; }
+int pad_count(void) { return BOARD_SMK37 ? 16 : 0; }
+int pad_held(int p) { return (unsigned)p < 16u && (in_pad_held >> p & 1u); }
+int pad_pressed(int p) { return (unsigned)p < 16u && (in_pad_press >> p & 1u); }
+int pad_velocity(int p) { return (unsigned)p < 16u ? (int)in_pad_vel[p] : 0; }
+int pad_pressure(int p) { return (unsigned)p < 16u ? (int)in_pad_pressure[p] : 0; }
+void led_pad(int p, uint16_t color) {
+#if BOARD_SMK37
+  if ((unsigned)p < 16u) {
+    padled_set((uint32_t)p, (uint8_t)((color >> 11) * 8u), (uint8_t)(((color >> 5) & 63u) * 4u),
+               (uint8_t)((color & 31u) * 8u));
+  }
+#else
+  (void)p, (void)color;
+#endif
+}
+void led_all_off(void) {
+  for (int p = 0; p < 16; p++) {
+    led_pad(p, 0);
+  }
+  for (int b = 0; b < BTN_COUNT; b++) {
+    led_button(b, 0);
+  }
+  for (int k = 0; k < key_total(); k++) {
+    led_key(k, 0);
+  }
+}
+#if BOARD_SMK37
+int fader_count(void) { return 4; }
+int fader(int i) { return (unsigned)i < 4u ? (int)fm1_in.fader[i] : 0; }
+int wheel_count(void) { return 2; }
+int wheel(int i) { return (unsigned)i < 2u ? (int)fm1_in.wheel[i] : 0; }
+int pedal_raw(void) { return (int)fm1_in.pedal; }
+#else
+int fader_count(void) { return 0; }
+int fader(int i) {
+  (void)i;
+  return 0;
+}
+int wheel_count(void) { return 0; }
+int wheel(int i) {
+  (void)i;
+  return 0;
+}
+int pedal_raw(void) { return -1; }
+#endif
 uint32_t buttons(void) { return in_btn; }
 int button_held(int b) { return (unsigned)b < BTN_COUNT && (in_btn >> b & 1u); }
 int button_pressed(int b) { return (unsigned)b < BTN_COUNT && (in_bp >> b & 1u); }
@@ -316,8 +436,8 @@ int button_released(int b) { return (unsigned)b < BTN_COUNT && (in_br >> b & 1u)
 int32_t encoder(int e) { return (unsigned)e < ENC_COUNT ? in_enc[e] : 0; }
 uint32_t master_knob(void) { return in_master; }
 void led_key(int k, int on) {
-  if ((unsigned)k < KEY_COUNT) {
-    fm1_led_key(14u + (uint32_t)k, on);
+  if ((unsigned)k < (unsigned)key_total()) {
+    fm1_led_key((BOARD_SMK37 ? 32u : 14u) + (uint32_t)k, on);
   }
 }
 void led_button(int b, int on) {
@@ -325,7 +445,51 @@ void led_button(int b, int on) {
     fm1_led_key((uint32_t)b, on);
   }
 }
+void led_button_dim(int b, int on) {
+  if ((unsigned)b >= BTN_COUNT) {
+    return;
+  }
+#if BOARD_SMK37
+  fm1_led_key_dim((uint32_t)b, on);
+#else
+  for (uint32_t p = 0; p < FM1_NCOL; p++) {
+    for (uint32_t r = 1; r < 5u; r++) {
+      if (FM1_KEYMAP[r][p] == (int8_t)b) {
+        if (on) {
+          fm1_led_dim[p] |= (uint8_t)(1u << r);
+        } else {
+          fm1_led_dim[p] &= (uint8_t)~(1u << r);
+        }
+      }
+    }
+  }
+#endif
+}
+void led_key_dim(int k, int on) {
+  if ((unsigned)k >= (unsigned)key_total()) {
+    return;
+  }
+#if BOARD_SMK37
+  fm1_led_key_dim(32u + (uint32_t)k, on);
+#else
+  int8_t id = (int8_t)(14 + k);
+  for (uint32_t p = 0; p < FM1_NCOL; p++) {
+    for (uint32_t r = 1; r < 5u; r++) {
+      if (FM1_KEYMAP[r][p] == id) {
+        if (on) {
+          fm1_led_dim[p] |= (uint8_t)(1u << r);
+        } else {
+          fm1_led_dim[p] &= (uint8_t)~(1u << r);
+        }
+      }
+    }
+  }
+#endif
+}
 void led_backlight(int level) {
+#if BOARD_SMK37
+  (void)level; /* (the SMK's keybed has no LEDs; its pads take led_pad) */
+#else
   static const uint16_t NS[3] = {0, 1000, 4000}; /* the pulse a frame; a lit LED is ~95 us */
   static int8_t was = -1;
   level = level < 0 ? 0 : level > 2 ? 2
@@ -344,8 +508,9 @@ void led_backlight(int level) {
   }
   was = (int8_t)level;
   fm1_led_bg_ns = NS[level];
+#endif
 }
-void print(const char *s) { (void)s; }
+void print(const char* s) { (void)s; }
 
 /* ---- the timer: 10 kHz key scan, milliseconds, USB at 2 kHz. It outranks the audio ISR; nested in a
  * render it only scans, counts and feeds the USB audio stream */
@@ -397,7 +562,7 @@ static volatile int32_t master_q12 = 2048;
 #if FOMA_USB_AUDIO
 static int32_t ain[HALF_WORDS]; /* this block of the host's audio (audio_in) */
 static int ain_on;
-const int32_t *audio_in(void) { return ain_on ? ain : 0; }
+const int32_t* audio_in(void) { return ain_on ? ain : 0; }
 #endif
 
 void fm1_alnk0_irq(void) { /* via isr_alnk0 (hal/fm1_isr.S) */
@@ -406,7 +571,7 @@ void fm1_alnk0_irq(void) { /* via isr_alnk0 (hal/fm1_isr.S) */
   p = fm1_audio_pending();
   fm1_audio_ack_aux(p);
   if (p & FM1_AUDIO_HALF) {
-    int32_t *o = &abuf[fm1_audio_free_half() * HALF_WORDS];
+    int32_t* o = &abuf[fm1_audio_free_half() * HALF_WORDS];
     {
       uint32_t m, t;
       do {
@@ -478,6 +643,7 @@ static void platform_poll(void) {
   if (fm1_ms >= 30000u && bootguard.pending) {
     bootguard_clear(&bootguard); /* 30 s up: this firmware boots */
   }
+#if !BOARD_SMK37
   if ((a = fm1_adc_read(FM1_ADC_MASTER)) >= 0) {
     uint32_t k10;
     knob_avg += (a * 16 - knob_avg) / 8;
@@ -485,9 +651,14 @@ static void platform_poll(void) {
     in_master = k10;
     master_q12 = (int32_t)((k10 * k10) >> 8);
   }
+#else
+  (void)a;
+  (void)knob_avg;
+  in_master = 512; /* no audio: K1 is an assignable knob (the app reads its steps) */
+#endif
 }
 
-static void fm1_fault(const fm1_crash_t *c) {
+static void fm1_fault(const fm1_crash_t* c) {
   char b[12];
   uint32_t i, t0, v[3] = {c->vec, c->pc, c->rets};
   fm1_audio_stop();
@@ -542,11 +713,15 @@ void fm1_cstart(void) {
   if (boot_mode == BOOT_RECOVERY || recovery_key()) {
     recovery_main(); /* OCT- at power-on: the USB rescue */
   }
-  flash_ok = FL_FAR(fl_jedec_ram)() == 0x856014u;
+  flash_ok = FL_JEDEC_OK(FL_FAR(fl_jedec_ram)());
   ota_boot_cleanup();
   lcd_init();
   lcd_fill(0, 0, 240, 240, C_BLACK);
   fm1_input_init();
+#if BOARD_SMK37
+  smk_trim_read();    /* the factory key / pad velocity curves (read only; defaults stand without them) */
+  smk_pad_events = 1; /* the app maps each pad itself: a hit is an event, not a note */
+#endif
   fm1_adc_init();
   fm1_audio_init(abuf, HALF_WORDS, isr_alnk0, 3); /* (abuf is zero: .bss) */
   usb_start();
@@ -562,6 +737,9 @@ void fm1_cstart(void) {
     platform_poll();
     input_snapshot();
     loop();
+#if BOARD_SMK37
+    padled_flush(); /* the pads' colours, only when one changed */
+#endif
     screen_flush();
   }
 }

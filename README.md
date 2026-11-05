@@ -1,229 +1,164 @@
-# foma
+# DUMBMIDI
 
-**F**m-**O**ne **M**akers' **A**ssistant
+![DUMBMIDI on the SMK-37](docs/screen.png)
 
-Write firmware for the M-VAVE FM-1 with nothing installed but Docker. Edit one C file, hear it in the browser emulator
-as you save, install it on the FM-1 from the same page.
+A MIDI controller firmware for the **M-VAVE SMK-37** (Pro, Elite, MKE-P37) and the **FM-1**: full-size note/chord
+display, control mapping on the screen, BLE MIDI + USB MIDI out, and a colour protocol that paints the pads (or the
+FM-1's key LEDs) from MIDI in.
 
-```sh
-./fm1 dev          # open http://localhost:8000
-```
+This is a firmware-only project: there is no web emulator or flasher. Get the packages from
+[mutant.cloud](https://mutant.cloud/) (Install), or build them below.
 
-That pulls the toolchain image ([konsumer/foma-toolchain](https://hub.docker.com/r/konsumer/foma-toolchain)) the first time, then builds your firmware and serves a page with:
-
-- **Emulator**: your code, compiled to WebAssembly, on a virtual FM-1 panel: the screen, keys, buttons, knobs, LEDs,
-  sound, MIDI in/out (Web MIDI), MIDI clock, settings, `print()` to a console. Save a file and it reloads; a compile
-  error shows on the page.
-- **Install**: puts your build (or any FM-1 `.fwsc`) on the FM-1 over USB, from Chrome or Edge.
-- **Rescue**: the USB rescue, finishing a cut-off install, going back to the official firmware.
-
-It is [Dinghy](https://github.com/zvenson/dinghy) made smaller: the same proven FM-1 platform (Felucca's, via SLOOP)
-under a smaller API, a Docker toolchain, and a web emulator in the spirit of
-[X0X](https://github.com/charlesvestal/fm1-x0x)'s.
-
-## Your firmware
-
-`src/main.c` (and any other `.c` in `src/`). Three functions, like an Arduino sketch:
-
-```c
-#include "fm1.h"
-
-static uint32_t phase;
-static volatile uint32_t inc;         /* written by loop(), read by audio() */
-
-void setup(void) {                       /* once, at power-on */
-  clear(BLACK);
-  text(80, 100, "HELLO", WHITE, FONT_BIG);
-}
-
-void loop(void) {                        /* over and over: read the panel, draw what changed */
-  inc = key_held(0) ? note_inc(KEY_FIRST_NOTE) : 0;
-}
-
-void audio(int32_t *out, uint32_t frames) {   /* the sound: add to out, L R L R, +-32767 */
-  for (uint32_t i = 0; i < frames; i++) {
-    phase += inc;
-    int32_t s = inc ? sine(phase) / 4 : 0;
-    out[2 * i] += s;
-    out[2 * i + 1] += s;
-  }
-}
-```
-
-Everything you can call is in [platform/fm1.h](platform/fm1.h): keys (`key_pressed`, `key_held`, ...), buttons
-(`BTN_PLAY`, ...), encoders (`encoder(ENC_KNOB1)`), LEDs, the screen (`clear`, `rect`, `line`, `pixel`, `text`),
-MIDI (`midi_read`, `midi_send`), `settings_load` / `settings_save`, `millis`, and sound helpers (`sine`, `note_inc`,
-`random32`).
-
-Name, version, package identity and build options: [firmware.json](firmware.json).
-
-### Build options
-
-Some parts of the platform are optional. They're all on unless `"options"` in `firmware.json` turns them off, and
-turning one off takes its code and memory out of the firmware:
-
-| Option       | What it adds                                                                                                                                                                            | Costs      |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
-| `usb_audio`  | A computer or tablet can pick the FM-1 as a 44.1 kHz stereo output. `audio_in()` gives `audio()` that sound: play it, process it, record it.                                            | 10 KiB RAM |
-| `trs_midi`   | MIDI in on the 3.5 mm TRS jack (a TRS-to-DIN adapter for most gear), through `midi_read()`, which says where each message came from.                                                    | <1 KiB     |
-| `midi_clock` | One MIDI clock for `audio()`: its own tempo or the clock coming in, sent out over USB if you like. `clock_events()` gives each block's ticks, start and stop at the frame they fall on. | 1 KiB RAM  |
-| `bluetooth`  | BLE MIDI in and out ([below](#bluetooth-midi)). Off unless turned on; on by default with `"platform": "mvave"`, which also has audio from a phone or computer.                           | 30 KiB code, 6 KiB RAM |
-
-```json
-{ "name": "MY SYNTH", "version": "0.1", "identity": "FM-1_95", "options": { "usb_audio": false } }
-```
-
-In your code, `#if FOMA_USB_AUDIO` (and `FOMA_TRS_MIDI`, `FOMA_MIDI_CLOCK`, `FOMA_BLUETOOTH`) tells you what's in. The
-FM-1 has no MIDI out on the TRS jack, so that can't be an option. The emulator follows MIDI clock from Web MIDI; it
-has no USB audio input (`audio_in()` gives 0) and no Bluetooth (the calls answer "not ready").
-
-### Bluetooth MIDI
-
-`"options": { "bluetooth": true }` makes the FM-1 a Bluetooth MIDI device that a computer, phone or tablet connects
-to. `bt_enable(BT_MIDI)` (from `loop()`) starts it; until then none of it runs. The first one pauses the sound
-while the radio starts (its start-up has timing a long `audio()` would break), so call it early, from `setup()` or
-the first `loop()`. It shows up as your firmware's name
-and four hex digits (`FOMA FC75`), the same on every boot. MIDI from it comes in through `midi_read` (`MIDI_BLE`),
-clock and start / stop through the clock helper (`clock_follow(MIDI_BLE)`), and `midi_send` goes out over it too.
-`bt_status()` says whether it's advertising, connected or ready for MIDI. Notes held when the link drops get their
-note-offs.
-
-It can also connect out, to a Bluetooth MIDI controller or another FM-1: `ble_scan()` looks for 15 s, `ble_device(i)`
-names the BLE MIDI devices found (with a rough signal), `ble_device_addr(i)` gives one's address (keep it to find the
-device again later with `ble_find()`), `ble_connect(i)` connects, `ble_disconnect()` leaves it (a computer connected
-to the FM-1 stays). A link not made in a few seconds is worth leaving and trying again. One link at a time, no
-pairing. A clock from Bluetooth is placed by its senders' time stamps, so it comes out as evenly as it was sent.
-
-On Felucca's platform it's Henri David's Bluetooth stack from [Optimist](https://github.com/w0ts/optimist) with the
-radio drivers of [felucca-bsp](https://github.com/hugelton/felucca-bsp) (`platform/ble`, `platform/hal/fm1_ble*.h`,
-`platform/bt.c`): written from the Bluetooth specifications and measurements of the FM-1's radio, no JieLi library.
-It starts the radio with the FM-1's own calibration, as the stock firmware left it in flash (the defaults when it's
-gone), and measures the radio's VCO bands at every start (with another unit's, reception went bad seconds after the
-start). No pairing (macOS and iOS connect without it) and no audio. Tested on FM-1s with a Mac and with each other.
-
-To connect from a Mac: Audio MIDI Setup, Window > Show MIDI Studio, the Bluetooth button, then Connect.
-
-### Platforms: Felucca's, or M-VAVE's SDK (Bluetooth)
-
-`"platform"` in `firmware.json` picks what runs under your code on the FM-1. Your code and `fm1.h` stay the same.
-
-- **`felucca`** (the default): Felucca's platform, all of it source, with Felucca's flash layout, updater and USB rescue
-  (OCT- at power-on).
-- **`mvave`**: M-VAVE's official FM1 SDK, from [fm1_open](https://github.com/m-vave/fm1_open) (in `platform/mvave`):
-  their binary library runs FreeRTOS, USB, Bluetooth and the flash, and foma runs on top of it. It adds:
-  - **Bluetooth** (the `bluetooth` option): BLE MIDI in and out through `midi_read` (`MIDI_BLE`) and `midi_send`, with
-    the FM-1 as a BLE MIDI device phones and computers connect to, or connecting to a BLE MIDI controller itself
-    (`ble_central`, `ble_scan`, `ble_connect`); and audio from a phone or computer (`bt_audio_in()`). It's off until
-    `bt_enable(BT_MIDI | BT_AUDIO)`; `bt_status()` says what's connected. See `fm1.h`.
-  - **USB audio both ways**: the computer can record what the FM-1 plays.
-
-  The trade-offs:
-  - **Space**: M-VAVE's own instrument is inside the SDK's library and can't be left out, and their layout keeps 524
-    KiB of flash for user data (`settings_load` / `settings_save` use it). That leaves about **46 KiB** of flash for
-    your code and data (the build says how much), and about 160 KiB of RAM (no `POOL`: it's all one RAM).
-  - **Their layout and updater**: switching platform loses saved settings, the package identity is `FM-1_8` and six
-    digits (from the version), and there's no OCT- rescue: M-VAVE's workbench and the chip's boot ROM still are.
-  - **Tested only in an emulator** so far ([fm1-emu](https://github.com/joakimeriksson/fm1-emu), with fixes for this
-    SDK): the screen, keys, knobs, audio and TRS MIDI work there. Bluetooth, USB audio, saved settings and installing
-    haven't been tried on an FM-1 yet.
-  - **License**: `platform/mvave` is M-VAVE's: GPLv3 with their SDK linking exception, the library under their
-    binary terms (FM-1 devices only). See `platform/mvave/LICENSE.md` and `THIRD_PARTY.md`.
-
-```json
-{ "name": "MY SYNTH", "version": "0.1", "identity": "FM-1_95", "platform": "mvave" }
-```
-
-## The rules of the chip
-
-The FM-1 runs a JieLi AC791N. The emulator is forgiving, the chip is not; the build refuses what would break it.
-
-- **Integers only.** No FPU and no float library: `float` / `double` fail the FM-1 build (the emulator still runs, and
-  the page shows why). Use fixed point: Q15 levels, 32-bit phases.
-- **No 64-bit division**, no C library (`printf`, `malloc`, `sin`). 64-bit multiplication is fine.
-- **A division by zero does not trap** on the FM-1 (it gives a wrong value); in the emulator it crashes. Test divisors.
-- **`audio()` has 5.8 ms per 256 frames**, less in practice. No screen, no flash, no waiting in it. Share with `loop()`
-  through `volatile` variables, one writer each. `midi_send` works from both.
-- **`loop()` should return within a few ms**: the USB, the updater and the watchdog run between passes.
-- **Draw only what changed**: sending a full screen takes ~80 ms.
-- **Save settings when silent**: a flash erase stops the sound for ~50 ms. Never in a loop: flash wears out.
-- **Memory**: 96 KiB RAM for your variables; mark big buffers `POOL` (~200 KiB more). `const` tables live in flash.
-- The build also refuses constants that look like a chip-ROM address, and hardware register access outside
-  `platform/hal/`.
-
-## Commands
-
-|               |                                                                                      |
-| ------------- | ------------------------------------------------------------------------------------ |
-| `./fm1 dev`   | build, serve on http://localhost:8000 (`PORT=9000 ./fm1 dev`), rebuild on every save |
-| `./fm1 build` | `build/web/` (the site) and `build/NAME-VERSION.fwsc` (the package)                  |
-| `./fm1 flash` | install the build on the FM-1 over USB, as the page's Install does (below)           |
-| `./fm1 fmt`   | format: clang-format (C), prettier (web), ruff (python)                              |
-| `./fm1 shell` | a shell in the toolchain container                                                   |
-| `./fm1 image` | build the toolchain image from the `Dockerfile` here, instead of pulling it          |
-
-`./fm1 flash` runs on your computer, not in Docker (Docker on a Mac can't reach USB), and needs only `python3`
-(CoreMIDI on macOS, ALSA on Linux; not on Windows yet: use the page). `./fm1 flash` installs `build/web/firmware.fwsc`,
-`./fm1 flash FILE.fwsc` any package, `./fm1 flash --id` says what the FM-1 runs (`FM-1_000`: the USB rescue). Quit
-other apps that use the FM-1's MIDI port first. If an install is cut off, run it again: it finishes it. With more than
-one FM-1 on USB, `./fm1 flash --list` numbers them and `--port N` first picks one (`./fm1 flash --port 2`).
-`./fm1 flash --crash` shows the last crash the FM-1 recorded (the USB rescue answers it too); with Bluetooth,
-`--bt` shows the link and what the last scan found, and `--radio` which radio calibration it started with.
-
-Windows: `fm1.cmd dev` (Docker Desktop). Without the script:
-`docker run --rm -it --platform linux/amd64 -p 8000:8000 -v "$PWD:/work" konsumer/foma-toolchain python3 tools/build.py --dev 8000`.
-
-## Publishing
-
-Push to GitHub and set **Settings → Pages → Source: GitHub Actions**: every push to `main` builds the firmware and
-publishes the emulator and the installer, so anyone can try your firmware and install it with a link. A tag (`v0.2`)
-also makes a release with the `.fwsc`.
-
-The toolchain image has its own workflow, `.github/workflows/toolchain.yml`: when the `Dockerfile` changes on `main`
-(or when run by hand) it builds the image, checks that it builds the firmware, and pushes it to Docker Hub. It needs the
-repo secrets `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN`.
-
-**Using this as a template:** copy it (GitHub's "Use this template", or clone it), then make it yours once:
+## Build
 
 ```sh
-./fm1 new "MY SYNTH" --identity FM-1_96      # --repo URL too, if there is no git remote "origin" yet
+./fm1 build
 ```
 
-That renames the firmware, points the page's Source link at your repo, writes your README, adds you to
-LICENSING.md, and removes what only foma needs (the `Dockerfile` and its workflow: your project uses the published
-`konsumer/foma-toolchain`).
+Everything runs in Docker (the `konsumer/foma-toolchain` image), nothing else to install. The build writes four
+packages:
 
-Pick your own `identity` in `firmware.json` before you share a build: the FM-1 and the installers tell firmwares apart
-by it. Taken so far: `900` SLOOP, `91N` Felucca, `93N` sloopDX, `97N` zp12, `98N` a Doom port, `99N` Dinghy; check the
-[FM-1 Firmware Hub](https://fm1.designburgapps.com).
+| File                             | Unit            | Package identity  |
+| -------------------------------- | --------------- | ----------------- |
+| `build/dumbmidi-1.0.0.fwsc`      | FM-1            | `FM-1_957`        |
+| `build/dumbmidi-smk37-1.0.0.fwsc` | SMK-37 Pro     | `SMK-37 Pro_990`  |
+| `build/dumbmidi-smk37-elite-1.0.0.fwsc` | SMK-37 Elite | `SMK-37 Elite_990` |
+| `build/dumbmidi-smk37-mke-1.0.0.fwsc` | MKE-P37     | `MKE-P37_990`     |
 
-## When it goes wrong
+The model name is part of the package: the stock updater only accepts a unit's own package. Use the file that
+matches the label on your keyboard.
 
-- **It crashes**: a red screen with the address (look it up in `build/fm1/firmware.dis`), then a restart. Crashing
-  twice at boot sends it to the USB rescue by itself.
-- **It won't start**: hold **OCT-** while switching on: the USB rescue (no sound, only the updater). Install from the
-  page.
-- **An install was cut off**: the FM-1 waits in update mode; the Rescue tab finishes it.
-- **Back to stock**: the Rescue tab installs M-VAVE's V15 (checked by its hash first).
-- **Nothing answers**: the chip's boot ROM can still be reached from a computer, not a browser: see the Rescue tab.
+**Read this before flashing an SMK-37:** unofficial firmware, flashed at your own risk. Back up the unit's flash
+first (the `fm1-to-smk37` kit's `jl-uboot-tool` procedure): it holds the factory key/pad calibration. This firmware
+never writes the calibration (the app's flash allow-list and the RAM flash driver both refuse it), but a full backup
+is the only real safety net. Going back: install the matching stock package from the [Firmware Hub](https://thefirmwarehub.com/smk37/).
 
-Installing firmware is at your own risk.
+## Play
 
-## Layout
+The main page is deliberately sparse: the chord the held notes make (`CMAJ7`, `C#MIN7/F`, ...) in large
+anti-aliased Inter Tight, the note names beneath it in small sans type, the octave and the modes that are on at the
+top, and the last note's velocity as one thin line at the bottom. A knob or fader move puts its `CCnn value` at
+the right for a moment. There is no logo and no page title; the menus are elsewhere.
 
+Hold notes on the keybed, the pads, or feed notes in over USB/BLE MIDI — all of them make the chord. `OCT-` / `OCT+`
+transpose the keybed an octave at a time (-24..+24 semitones, kept across power cycles). `HOME` returns to this page
+from anywhere. `HOME`+`REC` is the panic (all notes off, LEDs dark).
+
+### Controls
+
+| Control | SMK-37 | FM-1 |
+| --- | --- | --- |
+| keys | 37, velocity | 27, fixed velocity (100) |
+| pads | 16, velocity, RGB | — (pads' colours go to the key LEDs) |
+| knobs | 8, in banks A/B (`KNOB BANK`) | 4, in banks A/B |
+| faders | 4, in banks A/B (`FADER BANK`) | — |
+| wheels | pitch + mod | — |
+| pedal | jack, sustain-style switch | — |
+| function keys | ARP, CHORD, SCALE, PATCH, GLOBE, BT/SAVE | ARP, EDIT, SEL, HOME, GLO, SAVE |
+| menu keys | `<`/`>` pages and rows; K1 scrolls MAP | K1..K4 edit values |
+
+On the main page **all 8 knobs (FM-1: 4) are MIDI controls**. In MAP, K1 scrolls the rows. In a submenu or EDIT,
+**K1–K4 are the four values** on the cards; `OCT+` is **OK**, `OCT-` is **back**. On the main page `OCT-`/`OCT+` transpose the keybed. The buttons that do
+something on the current page glow dimly; solid means the mode is on.
+
+The original labels:
+
+- **PATCH** — home (the note/chord page).
+- **GLOBE** — the MAP page (control mapping) and back.
+- **`<` `>`** — the main pages (PERFORM → ARP → CHORD → SCALE → SPLIT) or the rows of MAP/EDIT.
+- **KNOB BANK / FADER BANK** — bank A/B; the LEDs show B.
+- **ARP / SCALE / CHORD** — open that mode's submenu. K1–K4 set its values (ARP: rate, pattern, octaves, BPM;
+  SCALE: on/off, root, type; CHORD: on/off). Press the same button again inside the submenu, or `OCT+` (OK), to
+  switch the mode on/off. Keys still play on those pages, so you hear the change.
+- **CHORD** with keys held learns their shape before it opens the submenu.
+- **Pad 1** on the ARP page is the beat lamp: it pulses on each quarter note and sets tap tempo when tapped.
+- **SPLIT** (the `<`/`>` page after SCALE) — K1 on/off, K2 split note, K3 lower channel, K4 upper channel. Keys below
+  the split note go out on the lower channel, the rest on the upper; chord memory, scale and arp apply inside each
+  zone.
+- **BT** — BLE MIDI on/off (solid = on, dim = off). USB MIDI is unaffected.
+
+Settings save themselves: after 2.5 s without a change (a stream of colour messages keeps it waiting until it
+stops). On the FM-1 the SAVE button also writes immediately.
+
+Mappable buttons (every other labelled button keeps its job): PARA, NOTE REPEAT, FX, SEQ, PLAY, REC on the SMK-37;
+FX, ENV, LFO, SEQ, PLAY, REC on the FM-1.
+
+## Map a control on the screen
+
+`GLO` (GLOBE) opens **MAP**: one row per control, with what it sends.
+
+1. Turn `SELECT` (or `<`/`>` on the SMK) to a control.
+2. `SEL` (SCALE) or `EDIT` (CHORD) opens **EDIT**.
+3. `KNOB 1` sets the type: `CC`, `NOTE`, `PC`, `PITCH`.
+4. `KNOB 2` sets the number (CC#, note, program), `KNOB 3` the channel, `KNOB 4` the mode (`MOM`/`TOG` for
+   buttons, `ABS`/`REL` for knobs).
+5. `EDIT` resets that control to its default; `SEL`/`<`/`>` moves to the next control.
+6. Changes save themselves after a couple of seconds of no changes. `GLO` goes back.
+
+Defaults: every control sends on channel 1. Keys play the keybed's notes (lowest key C3 on the SMK, F3 on the
+FM-1), pads notes 36-51, knobs CC 21-28 (bank A) and 31-38 (bank B), faders CC 7/11/91/93 (A) and 71/74/72/73 (B),
+buttons CC 41-46, the pitch wheel pitch bend, the mod wheel CC 1, the pedal CC 64. Each control's channel is editable
+in EDIT; SPLIT has its own lower/upper channels.
+
+## Arpeggiator, chord memory, scale
+
+- **ARP** holds the keys you press and plays them in **UP / DOWN / UPDOWN / RANDOM** at **1/4, 1/8, 1/16, 1/8T or
+  1/16T**, 1–4 octaves, 40–240 BPM (70% gate). Its page (press ARP, hold it, or `<`/`>`) edits rate, pattern,
+  octaves and BPM.
+- **CHORD** stores the shape of the chord held when you press it (up to 8 notes, intervals from the lowest). In
+  chord mode one key plays that shape transposed; the page shows the shape or `CUSTOM`.
+- **SCALE** snaps played notes to the nearest note of a scale (root + major, minor, dorian, phrygian, lydian,
+  mixolydian, locrian, two pentatonics, blues). Its page edits root and type.
+- The arp plays the chord-and-scale result, so chord memory + arp gives arpeggiated chords. The big display always
+  names what the keys are holding.
+
+## Colours from MIDI in
+
+Send on **channel 16** over USB or BLE. The SMK's 16 pads show the colour; on the FM-1 the same 16 slots light the
+white keys (F3 G3 A3 B3 C4 ... G5). Local hits flash white and return to their assigned colour.
+
+| Message | Meaning |
+| --- | --- |
+| Note On `36..51`, velocity 1..127 | pad 0..15 gets the colour at that point of the hue wheel |
+| Note On (same notes), velocity 0 | that pad goes dark |
+| CC `20..35`, value 1..127 | the same colour by hue, value 0 = dark |
+| CC `16`, value | brightness, 0..127 |
+| CC `17`, value 0 | all pads dark |
+
+Colours are saved after the stream goes quiet for 2.5 s (a continuously changing stream never writes the flash).
+
+## MIDI out
+
+Every mapped message goes out over USB MIDI and BLE MIDI at once. The unit advertises as a BLE MIDI device after
+power-on (the header shows `BLE` when the stack is up). Note messages use the velocities of the SMK's keys and pads;
+the FM-1's keys have none.
+
+The BLE MIDI stack is the FM-1's (Bluetooth MIDI on Felucca's platform, see [LICENSING.md](LICENSING.md)); it is
+built and shipped for the SMK-37 too, which has the same radio, but it has not been tested on an SMK-37 here. USB
+MIDI is unaffected if a unit refuses the BLE start-up.
+
+## Develop
+
+Only Docker is needed:
+
+```sh
+./fm1 build    # the four packages
+./fm1 fmt      # clang-format + ruff
+./fm1 shell    # a shell in the toolchain container
+./fm1 clean
 ```
-src/main.c            your firmware
-firmware.json         name, version, identity
-platform/fm1.h        the API
-platform/fm1.c        the FM-1 side (boot, rescue, updater, USB, panel, screen, audio)
-platform/web.c        the emulator side (the same API, for WebAssembly)
-platform/common.c     shared: drawing, fonts, sound helpers
-platform/clock.c      shared: the MIDI clock (midi_clock)
-platform/hal, src, loader, gen, sdk   the Felucca platform, vendored (src/usb.c trimmed to MIDI and usb_audio)
-platform/mvave        the "mvave" platform: port.c (fm1.h on the SDK), sdk.c, board/ and sdk/ from M-VAVE's fm1_open
-tools/build.py        the build (in Docker), with the checks
-web/                  the page: emulator, installer, rescue
+
+The app is `src/main.c`, the chord naming `src/chord.h`, the mapping table and its MIDI encoding `src/mapping.h`.
+`platform/fm1.h` documents every platform call; `platform/fm1.c` is the board-aware plumbing (SMK-37: keybed,
+pads, faders, wheels, pedal, flash map, update path). The rules of the chip (no float, no 64-bit division) are in
+[foma's README](https://github.com/konsumer/foma#the-rules-of-the-chip).
+
+Host tests, no chip needed:
+
+```sh
+tests/run.sh   # chord/mapping unit tests + both boards' screens rendered to build/host-*.ppm
 ```
 
-## License
+## Licence
 
 GPL-3.0-only. Credits and third-party parts: [LICENSING.md](LICENSING.md).
