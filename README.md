@@ -7,7 +7,7 @@ display, control mapping on the screen, BLE MIDI + USB MIDI out, and a colour pr
 FM-1's key LEDs) from MIDI in.
 
 This is a firmware-only project: there is no web emulator or flasher. Get the packages from
-[mutant.cloud](https://mutant.cloud/) (Install), or build them below.
+[mutant.cloud](https://mutant.cloud/#/p/dumbmidi) (Install), or build them below.
 
 ## Build
 
