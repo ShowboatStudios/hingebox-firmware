@@ -160,7 +160,7 @@ static const uint8_t STR2[] = {30, 3, 'F', 0, 'e', 0, 'l', 0, 'u', 0, 'c', 0, 'c
 #endif
 #define USB_PRODUCT APP_NAME " " SMK_MODEL
 #else
-#define USB_PRODUCT APP_NAME
+#define USB_PRODUCT APP_NAME " FM-1"   /* the installers only probe ports named like an FM-1 */
 #endif
 static uint8_t STR2[2u + 2u * (sizeof USB_PRODUCT - 1u)];
 static void str2_fill(void)
