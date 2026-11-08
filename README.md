@@ -20,10 +20,10 @@ packages:
 
 | File                             | Unit            | Package identity  |
 | -------------------------------- | --------------- | ----------------- |
-| `build/dumbmidi-1.0.1.fwsc`      | FM-1            | `FM-1_957`        |
-| `build/dumbmidi-smk37-1.0.1.fwsc` | SMK-37 Pro     | `SMK-37 Pro_990`  |
-| `build/dumbmidi-smk37-elite-1.0.1.fwsc` | SMK-37 Elite | `SMK-37 Elite_990` |
-| `build/dumbmidi-smk37-mke-1.0.1.fwsc` | MKE-P37     | `MKE-P37_990`     |
+| `build/dumbmidi-1.0.2.fwsc`      | FM-1            | `FM-1_957`        |
+| `build/dumbmidi-smk37-1.0.2.fwsc` | SMK-37 Pro     | `SMK-37 Pro_990`  |
+| `build/dumbmidi-smk37-elite-1.0.2.fwsc` | SMK-37 Elite | `SMK-37 Elite_990` |
+| `build/dumbmidi-smk37-mke-1.0.2.fwsc` | MKE-P37     | `MKE-P37_990`     |
 
 The model name is part of the package: the stock updater only accepts a unit's own package. Use the file that
 matches the label on your keyboard.
