@@ -15,7 +15,7 @@
 #if BOARD_SMK37
 /* SMK-37 Pro: 0xEB6014, 1 MiB, read from a unit over mask-ROM UBOOT (2026-10-09; jl-uboot-tool "Online device:
  * ID: 0xeb6014"). The driver uses only generic SPI NOR commands (9F, 05/35, 06, 20, 02, 0B). */
-#define FL_JEDEC_OK(id) ((id) == 0xEB6014u || (id) == 0x856014u)
+#define FL_JEDEC_OK(id) ((id) == 0xEB6014u || (id) == 0x856014u || (id) == 0xB36014u)   /* and the FM-1s' parts */
 #else
 /* FM-1: the Puya P25Q80 (0x856014); newer units from AliExpress carry a UC25HQ80 (0xB36014, 1 MiB, the same generic SPI NOR
  * commands – OberVave 3.3.1, 2026-11): without it they save to RAM only. */
