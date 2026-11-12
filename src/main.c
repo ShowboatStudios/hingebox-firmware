@@ -310,8 +310,16 @@ static char chord_txt[16];
 static char notes_txt[64];
 static uint8_t d_chord = 1, d_notes = 1, d_pills = 1, d_foot = 1, d_head = 1, d_page = 1, d_map = 1, d_edit = 1,
                d_set = 1;
-static char cc_txt[16];
-static uint32_t cc_at;
+/* the knob overlay (screen v3): a control's name, its value and a bar for 1.5 s. Local controls name themselves
+ * (ctl_name, set just before they send); with Hingebox connected the app names them (CC 107) instead */
+static char ov_name[17], ov_sub[16];
+static uint8_t ov_val, ov_pct, d_ov = 1;
+static uint16_t ov_col = C_ACC;
+static uint32_t ov_at;
+static const char* ctl_name;
+static uint32_t act_at; /* the last thing played or turned (Bop gets sleepy a minute after) */
+static int ov_on(void) { return ov_at && millis() - ov_at < 1500u; }
+static int hb_active(void);
 
 static void note_add(int n, int v) {
   if (n < 0 || n > 127) {
@@ -320,6 +328,7 @@ static void note_add(int n, int v) {
   if (!refs[n]++) {
     last_vel = (uint8_t)(v > 127 ? 127 : v);
   }
+  act_at = millis();
   ui_note_dirty();
 }
 
@@ -334,22 +343,31 @@ static void note_del(int n) {
 /* ---- MIDI out */
 static void send_msg(const uint8_t m[3]) {
   midi_send(m[0], m[1], m[2]);
-  if ((m[0] & 0xF0u) == 0xB0u) { /* the knob or fader just moved: say which CC and value */
-    char b[12];
+  act_at = millis();
+  if ((m[0] & 0xF0u) == 0xB0u && ctl_name && !hb_active()) { /* a knob or fader moved: its name, CC and value */
     int i = 0;
-    cc_txt[i++] = 'C', cc_txt[i++] = 'C';
+    for (; ctl_name[i] && i < 16; i++) {
+      ov_name[i] = ctl_name[i];
+    }
+    ov_name[i] = 0;
+    char b[12];
+    int k = 0;
+    ov_sub[k++] = 'c', ov_sub[k++] = 'c', ov_sub[k++] = ' ';
     format_int(b, m[1]);
-    for (int k = 0; b[k] && i < 9; k++) {
-      cc_txt[i++] = b[k];
+    for (int q = 0; b[q] && k < 7; q++) {
+      ov_sub[k++] = b[q];
     }
-    cc_txt[i++] = ' ';
-    format_int(b, m[2]);
-    for (int k = 0; b[k] && i < 15; k++) {
-      cc_txt[i++] = b[k];
+    ov_sub[k++] = ' ', ov_sub[k++] = 'c', ov_sub[k++] = 'h', ov_sub[k++] = ' ';
+    format_int(b, (m[0] & 0x0Fu) + 1);
+    for (int q = 0; b[q] && k < 15; q++) {
+      ov_sub[k++] = b[q];
     }
-    cc_txt[i] = 0;
-    cc_at = millis();
-    d_foot = 1;
+    ov_sub[k] = 0;
+    ov_val = m[2];
+    ov_pct = 0;
+    ov_col = C_ACC;
+    ov_at = millis() ? millis() : 1;
+    d_ov = 1;
   }
 }
 
@@ -436,11 +454,16 @@ static uint16_t pad_colour(int p) { return host_on ? host_rgb[p] : cfg.pad_rgb[p
 #define HB_VERSION 2 /* 0.2 */
 static char hb_text[3][17];
 static char hb_buf[17];
-static uint8_t hb_slot, hb_len, hb_overlay_val;
+static uint8_t hb_slot, hb_len;
+/* additive (capability 8): CC 104 the track's deck colour, CC 105 a moment (1 fill, 2 drop, 3 cheer), CC 106 the
+ * knob's deck colour (0-7: kick snare clap hat open tom perc bass; 127 default orange) */
+static uint8_t hb_track_col = 255, hb_knob_col = 255, hb_moment;
+static uint32_t hb_moment_at;
+static uint8_t host_vel[16]; /* the hues the pads were sent, for the screen's grid in the deck's colours */
 static int hb_step = -1;
 static uint16_t hb_bpm;
-static uint32_t hb_seen, hb_overlay_at;
-static uint8_t d_host = 1, d_bop = 1;
+static uint32_t hb_seen;
+static uint8_t d_host = 1, d_bop = 1, d_step = 1;
 /* the six mapped buttons' lights as Hingebox says (CC 41-46 on channel 16: SEQ PLAY lit while playing...) */
 static uint8_t host_btn[N_BTN_UI];
 static uint32_t splash_until;
@@ -459,6 +482,7 @@ static void mono_c(int y, const char* s, uint16_t c) {
   mono((SCREEN_W - text_width(s, FONT_SMALL)) / 2, y, s, c);
 }
 
+static uint16_t deck_colour(uint8_t i);
 static int hb_active(void) { return hb_seen && millis() - hb_seen < 4000u; }
 
 static void hb_cc(uint8_t cc, uint8_t v) {
@@ -469,7 +493,7 @@ static void hb_cc(uint8_t cc, uint8_t v) {
   switch (cc) {
     case 119:
       midi_send(0xBF, 119, 1);
-      midi_send(0xBF, 118, 7);
+      midi_send(0xBF, 118, 15); /* 1 pads, 2 screen, 4 buttons, 8 screen extras (CC 104-106) */
       midi_send(0xBF, 117, HB_VERSION);
       d_host = 1;
       break;
@@ -477,7 +501,7 @@ static void hb_cc(uint8_t cc, uint8_t v) {
       if ((v < 16 ? (int)v : -1) != hb_step) {
         int was = hb_step;
         hb_step = v < 16 ? (int)v : -1;
-        d_host = 1;
+        d_step = 1;
         if (was < 0 || hb_step < 0 || (hb_step % 4) == 0 || (was % 4) == 0) {
           d_bop = 1;
         }
@@ -508,9 +532,29 @@ static void hb_cc(uint8_t cc, uint8_t v) {
       }
       d_host = 1;
       break;
-    case 107:
-      hb_overlay_val = v;
-      hb_overlay_at = millis() ? millis() : 1;
+    case 107: /* the knob in slot 2: its name, value and bar, in its deck colour */
+      for (int i = 0; i < 17; i++) {
+        ov_name[i] = hb_text[2][i];
+      }
+      if (!ov_name[0]) {
+        ov_name[0] = 'k', ov_name[1] = 'n', ov_name[2] = 'o', ov_name[3] = 'b', ov_name[4] = 0;
+      }
+      ov_sub[0] = 0;
+      ov_val = v;
+      ov_pct = 1;
+      ov_col = hb_knob_col < 8 ? deck_colour(hb_knob_col) : C_ACC;
+      ov_at = millis() ? millis() : 1;
+      d_ov = 1;
+      break;
+    case 106:
+      hb_knob_col = v < 8 ? v : 255;
+      break;
+    case 105:
+      hb_moment = v < 4 ? v : 0;
+      hb_moment_at = millis();
+      break;
+    case 104:
+      hb_track_col = v < 8 ? v : 255;
       d_host = 1;
       break;
     default:
@@ -614,88 +658,277 @@ static void build_note_text(void) {
   notes_txt[i] = 0;
 }
 
-/* ---- the screen: menus get a small title; the performance page gets only what is needed */
-static void draw_header(void) {
-  rect(0, 0, SCREEN_W, 32, C_BG);
-  const char* sub = page == PG_MAP ? "MAP" : page == PG_EDIT ? "EDIT"
-                                         : page == PG_ARP    ? "ARP"
-                                         : page == PG_CHORD  ? "CHORD"
-                                         : page == PG_SPLIT  ? "SPLIT"
-                                                             : "SCALE";
-  aa_text(12, 2, sub, C_MUT, AA_SMALL);
-  if (bt_ready) {
-    aa_text_r(SCREEN_W - 12, 2, "BLE", C_ACC, AA_SMALL);
-  }
-  rect(0, 30, SCREEN_W, 1, C_LINE);
-}
+/* ---- the screen (screen v3, 2026-11-12; docs/SCREEN-REVIEW.md). One grid on every page: 12 px side margins, a
+ * 24 px status bar over a 1 px hairline, 16 px mono rows. Lowercase 8x16 mono for every label; Inter Tight only for
+ * the wordmark and the big chord. One accent (orange) for what's on, tempo in blue, the deck's track colours. */
+#define MX 12 /* the side margin */
+#define BAR_H 24
+#define C_GHOST RGB(58, 58, 60) /* the last chord, after the keys let go */
+#define C_KEYW RGB(74, 74, 76) /* the key strip's white keys */
+#define C_KEYB RGB(22, 22, 24) /* and black keys */
 
-/* the performance page: octave, the modes that are on, the chord, its notes, the last velocity as a thin rule */
-static void draw_main_status(void) {
-  rect(0, 0, SCREEN_W, 26, C_BG);
-  char b[12];
-  int oct = cfg.transpose / 12, i = 0;
-  b[i++] = 'O', b[i++] = 'C', b[i++] = 'T', b[i++] = ' ';
-  if (oct < 0) {
-    b[i++] = '-';
-    if (oct <= -10) {
-      b[i++] = (char)('0' + (-oct) / 10);
+/* the deck's track colours (Hingebox UI/Theme.swift, aluminium look): kick, snare, clap, hat, open, tom, perc, bass */
+static const uint16_t DECK[8] = {RGB(255, 92, 31), RGB(46, 107, 255), RGB(255, 112, 173), RGB(255, 199, 26),
+                                 RGB(46, 196, 107), RGB(148, 128, 255), RGB(237, 237, 232), RGB(46, 196, 107)};
+/* the hues (pad velocities) Hingebox sends for them (Stage/Keyboards.swift trackHue), and its fill / drop pads */
+static const uint8_t DECK_HUE[8] = {10, 80, 115, 22, 48, 95, 64, 48};
+
+/* a pad's colour on the screen: a track's hue as the deck's colour, anything else round the colour wheel */
+static uint16_t hue_colour(uint8_t v) {
+  for (int i = 0; i < 8; i++) {
+    if (DECK_HUE[i] == v) {
+      return DECK[i];
     }
-    b[i++] = (char)('0' + (-oct) % 10);
-  } else {
-    if (oct) {
-      b[i++] = '+';
-    }
-    b[i++] = (char)('0' + oct);
+  }
+  if (v == 20) {
+    return RGB(255, 226, 140); /* fill */
+  }
+  if (v == 3) {
+    return RGB(255, 59, 46); /* drop */
+  }
+  return hsv565((uint32_t)v * 2u, 190, 235);
+}
+static uint16_t deck_colour(uint8_t i) { return i < 8 ? DECK[i] : C_ACC; }
+
+static int str_len(const char* s) {
+  int n = 0;
+  while (s[n]) {
+    n++;
+  }
+  return n;
+}
+/* s, lowercase, into b (n bytes) */
+static void lower(char* b, const char* s, int n) {
+  int i = 0;
+  for (; s[i] && i < n - 1; i++) {
+    b[i] = (s[i] >= 'A' && s[i] <= 'Z') ? (char)(s[i] + 32) : s[i];
   }
   b[i] = 0;
-  /* the wordmark, as on the app: "hinge" in white, "box" in orange */
-  int wx = aa_text(14, 1, "hinge", C_TXT, AA_SMALL);
-  aa_text(wx, 1, "box", C_ACC, AA_SMALL);
-  mono(92, 4, b, C_MUT);
-  int x = 150;
-  mono(x, 4, "a", cfg.arp_on ? C_ACC : C_LINE);
-  mono(x + 14, 4, "c", cfg.chord_on ? C_ACC : C_LINE);
-  mono(x + 28, 4, "s", cfg.scale_on ? C_ACC : C_LINE);
-  mono(x + 42, 4, "p", cfg.split_on ? C_ACC : C_LINE);
+}
+/* right-aligned at xr; returns the left edge */
+static int mono_r(int xr, int y, const char* s, uint16_t c) {
+  int x = xr - text_width(s, FONT_SMALL);
+  mono(x, y, s, c);
+  return x;
+}
+/* the mono at 2x (16 x 32), crisp: each pixel a 2x2 block */
+static int mono2(int x, int y, const char* s, uint16_t c) {
+  char b[24];
+  lower(b, s, sizeof b);
+  return text_scale(x, y, b, c, FONT_SMALL, 2);
+}
+static int mono2_w(const char* s) { return text_width(s, FONT_SMALL) * 2; }
+static void hairline(int y) { rect(MX, y, SCREEN_W - 2 * MX, 1, C_LINE); }
+
+/* Hingebox is connected: two links of a chain, 15 x 7 */
+static void draw_link(int x, int y, uint16_t c) {
+  frame(x, y, 9, 7, c);
+  frame(x + 6, y, 9, 7, c);
+  rect(x + 7, y + 3, 1, 1, C_BG);
+}
+
+/* a page title: the name, an on/off pill (on < 0: none), and on the playing pages five dots for where you are */
+static int page_index(void);
+static void draw_title(const char* title, int on, const char* right) {
+  rect(0, 0, SCREEN_W, BAR_H, C_BG);
+  int x = mono(MX, 4, title, C_TXT);
+  if (on >= 0) {
+    x += 8;
+    if (on) {
+      bop_round(x, 4, 32, 16, 7, C_ACC, C_ACC, 1);
+      mono(x + 8, 4, "on", C_BG);
+    } else {
+      bop_round(x, 4, 32, 16, 7, C_BG, C_LINE, 1);
+      mono(x + 4, 4, "off", C_MUT);
+    }
+  }
+  int pi = page_index();
+  if (pi >= 0) {
+    for (int i = 0; i < 5; i++) {
+      int dx = SCREEN_W - MX - 3 - (4 - i) * 12;
+      bop_disc(dx, 11, i == pi ? 3 : 2, i == pi ? C_ACC : C_LINE);
+    }
+  } else if (right) {
+    mono_r(SCREEN_W - MX, 4, right, C_MUT);
+  }
+  hairline(BAR_H - 1);
+}
+
+/* a knob's row on the settings pages: its keycap (k1..k4), what it sets, the value at 2x */
+#define ROW_Y0 28
+#define ROW_H 34
+static void draw_knob_row(int i, const char* label, const char* value, uint16_t vc) {
+  int y = ROW_Y0 + i * ROW_H;
+  rect(0, y, SCREEN_W, ROW_H, C_BG);
+  char k[3] = {'k', (char)('1' + i), 0};
+  bop_round(MX, y + 7, 22, 18, 4, C_BG, C_LINE, 1);
+  mono(MX + 3, y + 8, k, C_MUT);
+  mono(MX + 30, y + 8, label, C_MUT);
+  int vw = mono2_w(value);
+  if (vw <= 116) {
+    mono2(SCREEN_W - MX - vw, y, value, vc);
+  } else {
+    mono_r(SCREEN_W - MX, y + 8, value, vc);
+  }
+  if (i < 3) {
+    rect(MX, y + ROW_H - 1, SCREEN_W - 2 * MX, 1, C_CARD);
+  }
+}
+
+/* the footer: a hint of which button does what, or "saved" for a moment */
+static void draw_hint(const char* hint) {
+  rect(0, 220, SCREEN_W, 20, C_BG);
+  if (saved_at && millis() - saved_at < 1500u) {
+    mono_c(222, "saved", C_ACC);
+  } else if (hint) {
+    mono_c(222, hint, C_MUT);
+  }
+}
+
+/* ---- a piano strip: notes lo..hi across (x, y, w, h), from white key to white key. A note is lit (in lit_c) when
+ * held[] counts it or its pitch class is in lit_pcs; dot_pcs get a dot; split (>= 0) gets an orange edge; middle C a
+ * mark below. Notes held outside lo..hi show as an arrow at that end. */
+static int is_black(int n) { return (0x54A >> (n % 12)) & 1; }
+static void draw_keys(int x, int y, int w, int h, int lo, int hi, const uint8_t* held, uint16_t lit_pcs,
+                      uint16_t lit_c, uint16_t dot_pcs, int split) {
+  rect(x - 10, y - 2, w + 20, h + 8, C_BG);
+  if (is_black(lo)) {
+    lo--;
+  }
+  if (is_black(hi)) {
+    hi++;
+  }
+  int nw = 0;
+  for (int n = lo; n <= hi; n++) {
+    nw += !is_black(n);
+  }
+  if (nw <= 0) {
+    return;
+  }
+  int ww = w / nw, x0 = x + (w - ww * nw) / 2;
+  int bw = ww * 3 / 5, bh = h * 3 / 5;
+  if (bw < 3) {
+    bw = 3;
+  }
+  int dot = ww >= 12 ? 3 : 2;
+  /* white keys */
+  int wi = 0;
+  for (int n = lo; n <= hi; n++) {
+    if (is_black(n)) {
+      continue;
+    }
+    int lit = (held && held[n]) || (lit_pcs >> (n % 12) & 1u);
+    int kx = x0 + wi * ww;
+    rect(kx, y, ww - 1, h, lit ? lit_c : C_KEYW);
+    if (dot_pcs >> (n % 12) & 1u) {
+      rect(kx + (ww - 1 - dot) / 2, y + h - dot - 3, dot, dot, lit ? C_BG : C_TXT);
+    }
+    if (n == 60) { /* middle C */
+      rect(kx + (ww - 1 - 3) / 2, y + h + 2, 3, 2, C_MUT);
+    }
+    if (n == split) {
+      rect(kx - 1, y - 2, 2, h + 4, C_ACC);
+    }
+    wi++;
+  }
+  /* black keys, on the gaps, with a black edge so they read on the white keys */
+  wi = 0;
+  for (int n = lo; n <= hi; n++) {
+    if (!is_black(n)) {
+      wi++;
+      continue;
+    }
+    int lit = (held && held[n]) || (lit_pcs >> (n % 12) & 1u);
+    int gx = x0 + wi * ww - 1; /* the gap between the white keys */
+    int kx = gx - bw / 2;
+    rect(kx - 1, y, bw + 2, bh + 1, C_BG);
+    rect(kx, y, bw, bh, lit ? lit_c : C_KEYB);
+    if (dot_pcs >> (n % 12) & 1u) {
+      rect(kx + (bw - 2) / 2, y + bh - 4, 2, 2, lit ? C_BG : C_TXT);
+    }
+    if (n == split) {
+      rect(gx - bw / 2 - 1, y - 2, 2, h + 4, C_ACC);
+    }
+  }
+  /* held notes past either end */
+  if (held) {
+    int below = 0, above = 0;
+    for (int n = 0; n < 128; n++) {
+      if (held[n]) {
+        below |= n < lo;
+        above |= n > hi;
+      }
+    }
+    for (int i = 0; i < 4; i++) {
+      if (below) {
+        rect(x0 - 4 - i, y + h / 2 - i, 1, 2 * i + 1, C_ACC);
+      }
+      if (above) {
+        rect(x0 + ww * nw + 2 + i, y + h / 2 - i, 1, 2 * i + 1, C_ACC);
+      }
+    }
+  }
+}
+
+/* the keys this keyboard covers (with OCT shifts) */
+static int keys_lo(void) {
+  int lo = cfg.map[map_of(CTL_KEYS, 0)].num + cfg.transpose;
+  return lo < 0 ? 0 : lo > 127 - 36 ? 127 - 36 : lo;
+}
+static int keys_hi(void) { return keys_lo() + key_total() - 1; }
+
+/* the status bar of the playing page: the wordmark; at the right the link to Hingebox, BLE, the modes that are
+ * on (spelt out when they fit) and the octave */
+static void draw_main_status(void) {
+  rect(0, 0, SCREEN_W, BAR_H, C_BG);
+  int wx = aa_text(MX, 3, "hinge", C_TXT, AA_SMALL);
+  wx = aa_text(wx, 3, "box", C_ACC, AA_SMALL);
+  int x = SCREEN_W - MX;
+  if (hb_active()) {
+    x -= 15;
+    draw_link(x, 9, C_ACC);
+    x -= 8;
+  }
   if (bt_ready) {
-    mono(SCREEN_W - 14 - 3 * 8, 4, "ble", C_ACC);
+    x = mono_r(x, 4, "ble", C_TXT) - 8;
   }
-}
-
-static void draw_main_chord(void) {
-  rect(0, 26, SCREEN_W, 74, C_BG);
-  if (chord_txt[0]) {
-    int face = AA_BIG;
-    if (aa_width(chord_txt, face) > SCREEN_W - 16) {
-      face = AA_MID;
+  static const char* const FULL[4] = {"arp", "chord", "scale", "split"};
+  static const char* const ONE[4] = {"a", "c", "s", "p"};
+  int on[4] = {cfg.arp_on, cfg.chord_on, cfg.scale_on, cfg.split_on};
+  char ov[8];
+  int oct = cfg.transpose / 12, o = 0;
+  if (oct > 0) {
+    ov[o++] = '+';
+  }
+  format_int(ov + o, oct);
+  int need = 24 + 4 + text_width(ov, FONT_SMALL); /* "oct" and its value */
+  for (int i = 0; i < 4; i++) {
+    if (on[i]) {
+      need += text_width(FULL[i], FONT_SMALL) + 8;
     }
-    if (aa_width(chord_txt, face) > SCREEN_W - 16) {
-      face = AA_SMALL;
+  }
+  int full = x - need >= wx + 8;
+  for (int i = 3; i >= 0; i--) {
+    if (on[i]) {
+      x = mono_r(x, 4, full ? FULL[i] : ONE[i], C_ACC) - 8;
     }
-    aa_text_c(0, 68 - aa_height(face) / 2, SCREEN_W, chord_txt, C_TXT, face);
   }
-  rect(16, 100, SCREEN_W - 32, 1, C_LINE);
+  x = mono_r(x, 4, ov, oct ? C_TXT : C_MUT) - 4;
+  mono_r(x, 4, "oct", C_MUT);
+  hairline(BAR_H - 1);
 }
 
-static void draw_main_notes(void) {
-  rect(0, 104, SCREEN_W, 30, C_BG);
-  if (notes_txt[0]) {
-    mono_c(110, notes_txt, C_MUT);
-  }
-}
-
-static void draw_main_cc(void) {
-  rect(0, 140, SCREEN_W, 24, C_BG);
-  if (cc_at && millis() - cc_at < 1500u) {
-    aa_text_r(SCREEN_W - 16, 144, cc_txt, C_MUT, AA_SMALL);
-  }
-}
-
+/* the last velocity, labelled */
 static void draw_main_meter(void) {
-  rect(0, 222, SCREEN_W, 18, C_BG);
-  rect(16, 232, SCREEN_W - 32, 1, C_LINE);
+  rect(0, 220, SCREEN_W, 20, C_BG);
+  mono(MX, 222, "vel", C_MUT);
+  int bx = MX + 32, bw = SCREEN_W - MX - 32 - bx;
+  rect(bx, 230, bw, 1, C_LINE);
   if (last_vel) {
-    rect(16, 231, last_vel * (SCREEN_W - 32) / 127, 2, C_ACC);
+    rect(bx, 229, last_vel * bw / 127, 3, C_ACC);
+    char v[8];
+    format_int(v, last_vel);
+    mono_r(SCREEN_W - MX, 222, v, C_TXT);
   }
 }
 
@@ -744,9 +977,8 @@ static void row_label(int r, char* b) {
       break;
     case CTL_PAD:
       for (const char* s = "PAD "; *s; s++) b[p++] = *s;
-      if (i < 9)
-        b[p++] = '0';
-      b[p++] = (char)('1' + i);
+      b[p++] = (char)('0' + (i + 1) / 10); /* 01..16 (was "PAD :" for pad 10) */
+      b[p++] = (char)('0' + (i + 1) % 10);
       break;
     case CTL_KNOB:
       for (const char* s = "KNOB "; *s; s++) b[p++] = *s;
@@ -797,34 +1029,6 @@ static void row_value(int r, char* b) {
   b[p] = 0;
 }
 
-static void draw_map(void) {
-  rect(0, 0, SCREEN_W, SCREEN_H, C_BG);
-  draw_header();
-  char b[12] = {0};
-  format_int(b, map_sel + 1);
-  text(120, 5, b, C_MUT, FONT_SMALL);
-  text(136, 5, "/", C_MUT, FONT_SMALL);
-  format_int(b, n_rows);
-  text(144, 5, b, C_MUT, FONT_SMALL);
-  if (map_sel < map_top) {
-    map_top = map_sel;
-  }
-  if (map_sel > map_top + 10) {
-    map_top = map_sel - 10;
-  }
-  for (int i = 0; i < 11 && map_top + i < n_rows; i++) {
-    int r = map_top + i, y = 36 + i * 16;
-    char label[16], value[32];
-    row_label(r, label);
-    row_value(r, value);
-    if (r == map_sel) {
-      rect(4, y - 1, SCREEN_W - 8, 15, C_SEL);
-      rect(4, y - 1, 2, 15, C_ACC);
-    }
-    text(10, y, label, r == map_sel ? C_TXT : C_MUT, FONT_SMALL);
-    text(SCREEN_W - 8 - text_width(value, FONT_SMALL), y, value, r == map_sel ? C_ACC : C_TXT, FONT_SMALL);
-  }
-}
 
 /* ---- the EDIT page */
 static int edit_slot;
@@ -869,47 +1073,6 @@ static int slot_row(int slot) {
   return 0;
 }
 
-static void draw_edit(void) {
-  rect(0, 0, SCREEN_W, SCREEN_H, C_BG);
-  draw_header();
-  map_t* m = &cfg.map[edit_slot];
-  char label[16];
-  row_label(slot_row(edit_slot), label);
-  text(12, 36, label, C_TXT, FONT_SMALL);
-  static const char* const FIELD[4] = {"TYPE", "NUM", "CHAN", "MODE"};
-  char val[4][12] = {{0}};
-  for (int i = 0; i < 4; i++) {
-    int x = 8 + i * 58, y = 58;
-    rect(x, y, 54, 86, C_CARD);
-    frame(x, y, 54, 86, C_LINE);
-    text(x + (54 - text_width(FIELD[i], FONT_SMALL)) / 2, y + 6, FIELD[i], C_MUT, FONT_SMALL);
-    const char* v = "";
-    if (i == 0) {
-      v = msg_name(m->type);
-    } else if (i == 1) {
-      if (m->type == MSG_PITCH) {
-        v = "-";
-      } else {
-        format_int(val[i], m->num);
-        v = val[i];
-      }
-    } else if (i == 2) {
-      format_int(val[i], m->chan);
-      v = val[i];
-    } else {
-      v = mode_name(m->mode);
-    }
-    int sc = text_width(v, FONT_BIG) <= 50 ? FONT_BIG : FONT_SMALL;
-    int w = text_width(v, sc);
-    text(x + (54 - w) / 2, y + 34 + (sc == FONT_BIG ? 0 : 8), v, C_ACC, sc);
-    char k[12] = "K1";
-    k[1] = (char)('1' + i);
-    text(x + (54 - text_width(k, FONT_SMALL)) / 2, y + 70, k, C_LINE, FONT_SMALL);
-  }
-  if (saved_at && millis() - saved_at < 1500u) {
-    text(12, 216, "SAVED TO FLASH", C_ACC, FONT_SMALL);
-  }
-}
 
 /* ---- dirty bookkeeping */
 
@@ -923,8 +1086,9 @@ static void ui_full(void) {
   d_chord = d_notes = d_pills = d_foot = d_head = 1;
 }
 
-/* the bottom band (y 166-220): Bop on the left; with Hingebox connected, the groove, tempo and track, and the
- * pads as a 2x8 grid with the playhead */
+/* ---- the playing page. Without Hingebox: status, the chord, the key strip, Bop and what's on, the velocity.
+ * With Hingebox: status (with the link), the deck row (groove, track, tempo), the chord, the key strip, Bop and the
+ * pad grid with the playhead, the velocity. A knob's overlay takes the top half for 1.5 s. */
 static int cnt_notes_held(void) {
   int n = 0;
   for (int i = 0; i < 128; i++) {
@@ -933,171 +1097,545 @@ static int cnt_notes_held(void) {
   return n;
 }
 
-static void draw_bop_corner(void) {
-  int mood = BOP_IDLE;
-  if (chord_txt[0] && notes_txt[0] && cnt_notes_held() >= 3) {
-    mood = BOP_HAPPY;
-  } else if (cnt_notes_held() > 0) {
-    mood = BOP_WOW;
+/* the regions (y, height) of the two layouts */
+#define HOST_DECK_Y 24  /* groove, track, tempo: 24-61 */
+#define HOST_CHORD_Y 64 /* the chord and its notes: 64-117 */
+#define HOST_CHORD_H 54
+#define HOST_KEYS_Y 122
+#define HOST_KEYS_H 22
+#define SOLO_CHORD_Y 24 /* 24-107 */
+#define SOLO_CHORD_H 84
+#define SOLO_KEYS_Y 114
+#define SOLO_KEYS_H 30
+#define BAND_Y 152 /* Bop and the grid / what's on: 152-219 */
+
+static char last_chord[16];
+static uint8_t d_band = 1;
+
+/* the chord: big (Inter Tight, the one place besides the wordmark), its notes in mono under it. With nothing held:
+ * the last chord as a ghost (solo), or the beat as four blocks (Hingebox playing) */
+static void draw_main_chord(void) {
+  int host = hb_active();
+  int y0 = host ? HOST_CHORD_Y : SOLO_CHORD_Y, h = host ? HOST_CHORD_H : SOLO_CHORD_H;
+  rect(0, y0, SCREEN_W, h, C_BG);
+  int named = chord_txt[0] && chord_txt[0] != '?'; /* two notes have no chord name: just their notes */
+  if (named) {
+    int i = 0;
+    for (; chord_txt[i] && i < 15; i++) {
+      last_chord[i] = chord_txt[i];
+    }
+    last_chord[i] = 0;
   }
-  int lift = (hb_active() && hb_step >= 0 && (hb_step % 4) < 2) ? 3 : 0;
-  bop_draw(8, 164, 46, mood, lift, C_BG, C_TXT, C_BOPBODY, C_ACC);
+  const char* s = named ? chord_txt : chord_txt[0] ? "" : last_chord;
+  if (host && !chord_txt[0]) {
+    /* the beat, readable across the room: four blocks, the one playing in orange, the sixteenths as ticks */
+    int bw = 48, gap = (SCREEN_W - 2 * MX - 4 * bw) / 3, by = y0 + 8;
+    for (int b = 0; b < 4; b++) {
+      int bx = MX + b * (bw + gap);
+      int now = hb_step >= 0 && hb_step / 4 % 4 == b;
+      rect(bx, by, bw, 14, now ? C_ACC : C_CARD);
+      for (int t = 0; t < 4; t++) {
+        int tx = bx + t * 12 + 4;
+        rect(tx, by + 20, 4, 4, (now && hb_step % 4 >= t) ? C_TXT : C_LINE);
+      }
+    }
+    if (hb_step < 0) {
+      mono_c(by + 30, "stopped", C_MUT);
+    }
+    return;
+  }
+  if (!s[0]) {
+    if (notes_txt[0]) {
+      mono_c(host ? y0 + 20 : y0 + 34, notes_txt, C_TXT);
+    }
+    return;
+  }
+  int face = host ? AA_MID : AA_BIG;
+  if (aa_width(s, face) > SCREEN_W - 2 * MX) {
+    face = AA_MID;
+  }
+  if (aa_width(s, face) > SCREEN_W - 2 * MX) {
+    face = AA_SMALL;
+  }
+  int cy = host ? y0 + 20 : y0 + 34; /* the cap height's middle */
+  aa_text_c(0, cy - aa_height(face) / 2, SCREEN_W, s, chord_txt[0] ? C_TXT : C_GHOST, face);
+  if (chord_txt[0] && notes_txt[0]) {
+    mono_c(host ? y0 + 38 : y0 + 66, notes_txt, C_MUT);
+  }
 }
 
-static void draw_host(void) {
-  rect(60, 164, SCREEN_W - 60, 56, C_BG);
-  if (!hb_active()) {
-    return;
-  }
-  if (hb_overlay_at && millis() - hb_overlay_at < 1500u) {
-    /* a knob just moved: its Hingebox name and a bar */
-    mono(66, 168, hb_text[2][0] ? hb_text[2] : "knob", C_TXT);
-    rect(66, 192, SCREEN_W - 82, 6, C_LINE);
-    rect(66, 192, hb_overlay_val * (SCREEN_W - 82) / 127, 6, C_ACC);
-    char v[14];
-    format_int(v, hb_overlay_val * 100 / 127);
-    int n = 0;
-    while (v[n]) {
-      n++;
-    }
-    v[n] = '%', v[n + 1] = 0;
-    mono(SCREEN_W - 16 - text_width(v, FONT_SMALL), 202, v, C_MUT);
-    return;
-  }
-  mono(66, 166, hb_text[0][0] ? hb_text[0] : "hingebox", C_TXT);
-  char line[24];
-  int i = 0;
+static void draw_main_keys(void) {
+  int host = hb_active();
+  draw_keys(MX, host ? HOST_KEYS_Y : SOLO_KEYS_Y, SCREEN_W - 2 * MX, host ? HOST_KEYS_H : SOLO_KEYS_H, keys_lo(),
+            keys_hi(), refs, 0, C_ACC, cfg.scale_on ? (uint16_t)(((SCALE_MASK[cfg.scale_type] << cfg.scale_root) |
+                                                                  (SCALE_MASK[cfg.scale_type] >> (12 - cfg.scale_root))) &
+                                                                 0xFFFu)
+                                                    : 0,
+            cfg.split_on ? cfg.split_note : -1);
+}
+
+/* the deck row: the groove, the track in its deck colour, the tempo in blue at 2x */
+static void draw_deck_row(void) {
+  rect(0, HOST_DECK_Y, SCREEN_W, 38, C_BG);
+  int limit = SCREEN_W - MX;
   if (hb_bpm) {
-    char t[12];
+    char t[8];
     format_int(t, hb_bpm);
-    for (int k = 0; t[k]; k++) {
-      line[i++] = t[k];
-    }
-    const char* u = " bpm";
-    for (int k = 0; u[k]; k++) {
-      line[i++] = u[k];
-    }
+    int bx = SCREEN_W - MX - 24;
+    mono(bx, HOST_DECK_Y + 18, "bpm", C_MUT);
+    int nx = bx - 4 - mono2_w(t);
+    mono2(nx, HOST_DECK_Y + 2, t, C_BLUE);
+    limit = nx - 8;
   }
-  line[i] = 0;
-  if (line[0]) {
-    /* the number in Hingebox blue, "bpm" after it in grey */
-    int n = 0;
-    while (line[n] && line[n] != ' ') {
-      n++;
-    }
-    char num[8];
-    for (int k = 0; k < n && k < 7; k++) {
-      num[k] = line[k];
-    }
-    num[n < 7 ? n : 7] = 0;
-    int nx = mono(66, 185, num, C_BLUE);
-    mono(nx + 4, 185, "bpm", C_MUT);
+  char g[17];
+  int fit = (limit - MX) / 8;
+  lower(g, hb_text[0][0] ? hb_text[0] : "hingebox", fit + 1 < 17 ? fit + 1 : 17);
+  mono(MX, HOST_DECK_Y + 2, g, C_TXT);
+  uint16_t tc = deck_colour(hb_track_col);
+  if (hb_text[1][0]) {
+    rect(MX, HOST_DECK_Y + 22, 8, 8, tc);
+    lower(g, hb_text[1], fit - 1 < 17 && fit > 2 ? fit - 1 : 17);
+    mono(MX + 14, HOST_DECK_Y + 18, g, tc);
   }
-  mono(66, 204, hb_text[1], C_ACC);
-  /* the pads, as lit, with the playhead framed */
-  int gx = 152, gy = 180, cw = 9, ch = 11, g = 1; /* wider than tall, like the real pads */
+  hairline(HOST_DECK_Y + 37);
+}
+
+/* the pads as Hingebox lights them, in the deck's colours: 2 rows of 8, in groups of four like the steps, the
+ * playhead framed in white with an orange bar under its column */
+#define GRID_X 66
+#define GRID_Y 160
+#define PAD_W 18
+#define PAD_H 16
+static int grid_x(int col) { return GRID_X + col * (PAD_W + 2) + (col >= 4 ? 4 : 0); }
+static void draw_grid(void) {
+  rect(GRID_X - 4, BAND_Y, SCREEN_W - GRID_X + 4, 66, C_BG);
   for (int p = 0; p < 16; p++) {
-    int x = gx + (p % 8) * (cw + g), y = gy + (p / 8) * (ch + g);
-    uint16_t c = pad_colour(p);
-    rect(x, y, cw, ch, c ? c : C_CARD);
+    int x = grid_x(p % 8), y = GRID_Y + (p / 8) * (PAD_H + 3);
+    uint16_t c = host_on ? (host_vel[p] ? hue_colour(host_vel[p]) : 0) : cfg.pad_rgb[p];
+    if (!c) {
+      c = C_CARD;
+    }
+    if (pad_count() && pad_held(p)) {
+      c = blend565(c, WHITE, 150);
+    }
+    rect(x, y, PAD_W, PAD_H, c);
+    if (p == hb_step) {
+      frame(x, y, PAD_W, PAD_H, C_TXT);
+      frame(x + 1, y + 1, PAD_W - 2, PAD_H - 2, C_TXT);
+    }
+  }
+  int ry = GRID_Y + 2 * PAD_H + 3 + 6;
+  rect(GRID_X, ry + 1, grid_x(7) + PAD_W - GRID_X, 1, C_LINE);
+  for (int col = 0; col < 8; col += 4) { /* the beats: a notch at each group */
+    rect(grid_x(col), ry + 1, 1, 3, C_MUT);
   }
   if (hb_step >= 0) {
-    int x = gx + (hb_step % 8) * (cw + g), y = gy + (hb_step / 8) * (ch + g);
-    frame(x - 1, y - 1, cw + 2, ch + 2, C_TXT);
+    rect(grid_x(hb_step % 8), ry, PAD_W, 4, C_ACC);
+  }
+}
+
+/* ---- Bop: bob on the beat, happy on a chord of three or more, surprised on a fill or a drop, sleepy after a
+ * minute of nothing, a blink now and then, the pupils toward the notes. Redrawn only when that changes. */
+#define BOP_X 10
+#define BOP_Y 156
+#define BOP_S 44
+static uint32_t hb_hi_at;  /* Hingebox just connected: a happy hello */
+static uint16_t bop_drawn = 0xFFFF;
+
+static int bop_mood(void) {
+  uint32_t now = millis();
+  if (hb_moment && now - hb_moment_at < 1500u) {
+    return hb_moment == 3 ? BOP_HAPPY : BOP_WOW;
+  }
+  if (hb_hi_at && now - hb_hi_at < 2000u) {
+    return BOP_HAPPY;
+  }
+  if (chord_txt[0] && chord_txt[0] != '?' && cnt_notes_held() >= 3) {
+    return BOP_HAPPY;
+  }
+  int playing = hb_active() && hb_step >= 0;
+  if (!playing && !cnt_notes_held() && now - act_at > 60000u) {
+    return BOP_SLEEPY;
+  }
+  return BOP_IDLE;
+}
+
+static uint16_t bop_state(void) {
+  int mood = bop_mood();
+  /* up on the beat, down on the off-beat; above 170 bpm on every other beat, so it never moves faster than 3 Hz */
+  int lift = (hb_active() && hb_step >= 0 && (hb_bpm > 170 ? (hb_step % 8) < 4 : (hb_step % 4) < 2)) ? 2 : 0;
+  int look = 0, n = 0, sum = 0;
+  for (int i = 0; i < 128; i++) {
+    if (refs[i]) {
+      sum += i;
+      n++;
+    }
+  }
+  if (n) {
+    int mid = (keys_lo() + keys_hi()) / 2, half = key_total() / 2 + 1;
+    look = (sum / n - mid) * 3 / half;
+    look = look < -2 ? -2 : look > 2 ? 2 : look;
+  }
+  int blink = mood != BOP_SLEEPY && (millis() / 120u) % 34u == 0;
+  return (uint16_t)(mood | lift << 2 | (look + 2) << 5 | blink << 8);
+}
+
+static void draw_bop_corner(uint16_t st) {
+  int mood = st & 3, lift = st >> 2 & 7, look = (st >> 5 & 7) - 2, blink = st >> 8 & 1;
+  rect(0, BAND_Y, GRID_X - 6, 68, C_BG);
+  bop_draw_ex(BOP_X, BOP_Y, BOP_S, mood, lift, look, blink, C_BG, C_TXT, C_BOPBODY, C_ACC);
+  if (mood == BOP_SLEEPY) {
+    mono(BOP_X + 38, BAND_Y, "z", C_MUT);
+    mono(BOP_X + 46, BAND_Y + 4, "z", C_LINE);
+  }
+  bop_drawn = st;
+}
+
+/* without Hingebox, beside Bop: the modes that are on, or Bop's line */
+static const char* chord_mood_line(void) {
+  const char* c = chord_txt;
+  for (int i = 0; c[i]; i++) {
+    if (c[i] == 'D' && c[i + 1] == 'I') {
+      return "spooky!";
+    }
+    if (c[i] == 'A' && c[i + 1] == 'U') {
+      return "dreamy...";
+    }
+    if (c[i] == 'S' && c[i + 1] == 'U') {
+      return "floaty!";
+    }
+  }
+  for (int i = 0; c[i]; i++) {
+    if (c[i] == 'M' && c[i + 1] == 'I') {
+      return "moody...";
+    }
+  }
+  for (int i = 0; c[i]; i++) {
+    if (c[i] >= '6' && c[i] <= '9') {
+      return "jazzy!";
+    }
+  }
+  return "sunny!";
+}
+
+static void draw_band_text(void) {
+  int x = 68, lab = 68, val = 116;
+  rect(x - 4, BAND_Y, SCREEN_W - x + 4, 66, C_BG);
+  char v[3][20];
+  const char* l[3];
+  int n = 0;
+  if (cfg.arp_on && n < 3) {
+    char b[20];
+    int i = 0;
+    for (const char* s = ARP_RATE_NAME[cfg.arp_rate]; *s; s++) b[i++] = *s;
+    b[i++] = ' ';
+    for (const char* s = ARP_PAT_NAME[cfg.arp_pat]; *s && i < 19; s++) b[i++] = *s;
+    b[i] = 0;
+    lower(v[n], b, 20);
+    l[n++] = "arp";
+  }
+  if (cfg.chord_on && n < 3) {
+    lower(v[n], chord_shape_name(), 20);
+    l[n++] = "chord";
+  }
+  if (cfg.scale_on && n < 3) {
+    char b[20];
+    int i = 0;
+    for (const char* s = NOTE_NAME[cfg.scale_root]; *s; s++) b[i++] = *s;
+    b[i++] = ' ';
+    for (const char* s = SCALE_NAME[cfg.scale_type]; *s && i < 19; s++) b[i++] = *s;
+    b[i] = 0;
+    lower(v[n], b, 20);
+    l[n++] = "scale";
+  }
+  if (cfg.split_on && n < 3) {
+    char b[20];
+    int i = 0;
+    for (const char* s = NOTE_NAME[cfg.split_note % 12]; *s; s++) b[i++] = *s;
+    b[i++] = (char)('0' + (cfg.split_note / 12 - 1 < 0 ? 0 : cfg.split_note / 12 - 1));
+    b[i] = 0;
+    lower(v[n], b, 20);
+    l[n++] = "split";
+  }
+  if (n) {
+    for (int i = 0; i < n; i++) {
+      mono(lab, BAND_Y + 8 + i * 18, l[i], C_MUT);
+      mono(val, BAND_Y + 8 + i * 18, v[i], C_TXT);
+    }
+    return;
+  }
+  /* Bop's line */
+  int held = cnt_notes_held(), mood = bop_mood();
+  const char *a, *b;
+  if (mood == BOP_SLEEPY) {
+    a = "zzz...", b = "play to wake me";
+  } else if (mood == BOP_HAPPY && chord_txt[0]) {
+    a = chord_mood_line(), b = held >= 4 ? "fancy chord" : "that's a chord";
+  } else if (held == 2) {
+    a = "two notes...", b = "one more!";
+  } else if (held == 1) {
+    a = "ooh, a note", b = "add two more";
+  } else {
+    a = "play a chord", b = "i'll name it";
+  }
+  mono(x, BAND_Y + 8, a, C_TXT);
+  mono(x, BAND_Y + 26, b, C_MUT);
+  mono(x, BAND_Y + 44, "or plug in hingebox", RGB(78, 78, 76));
+}
+
+/* ---- the knob overlay: what the knob does, a bar, its value; in the knob's deck colour when Hingebox says */
+static void draw_overlay(void) {
+  int host = hb_active();
+  int y0 = BAR_H, h = (host ? HOST_KEYS_Y : SOLO_KEYS_Y) - 4 - y0;
+  rect(0, y0, SCREEN_W, h, C_BG);
+  char v[8];
+  format_int(v, ov_pct ? ov_val * 100 / 127 : ov_val);
+  if (ov_pct) {
+    int n = str_len(v);
+    v[n] = '%', v[n + 1] = 0;
+  }
+  int vw = mono2_w(v);
+  mono2(SCREEN_W - MX - vw, y0 + 8, v, ov_col);
+  int room = SCREEN_W - 2 * MX - vw - 12;
+  if (mono2_w(ov_name) <= room) {
+    mono2(MX, y0 + 8, ov_name, C_TXT);
+  } else {
+    mono(MX, y0 + 16, ov_name, C_TXT);
+  }
+  int by = y0 + 48, bw = SCREEN_W - 2 * MX;
+  rect(MX, by, bw, 16, C_CARD);
+  rect(MX, by, ov_val * bw / 127, 16, ov_col);
+  for (int q = 1; q < 4; q++) {
+    rect(MX + bw * q / 4, by, 1, 16, C_BG);
+  }
+  if (ov_sub[0]) {
+    mono(MX, by + 22, ov_sub, C_MUT);
   }
 }
 
 static void draw_perform(void) {
+  int host = hb_active();
   if (d_page) {
     clear(C_BG);
+    d_head = d_chord = d_host = d_step = d_band = d_ov = 1;
+    bop_drawn = 0xFFFF;
   }
-  if (d_page || d_chord || d_notes || d_pills || d_foot) {
+  if (d_chord || d_notes || d_pills) {
     build_note_text();
+    d_chord = 1;
   }
-  if (d_page || d_head || d_chord || d_notes || d_foot) {
+  int ov = ov_on();
+  if (d_head) {
     draw_main_status();
-    draw_main_chord();
-    draw_main_notes();
-    draw_main_cc();
+  }
+  if (ov) {
+    if (d_ov) {
+      draw_overlay();
+    }
+  } else {
+    if (host && d_host) {
+      draw_deck_row();
+    }
+    if (d_chord || d_host || (host && d_step && !chord_txt[0])) {
+      draw_main_chord();
+    }
+  }
+  if (d_chord || d_head) {
+    draw_main_keys();
+  }
+  if (host) {
+    if (d_host || d_step || d_chord) {
+      draw_grid();
+    }
+  } else if (d_band || d_chord || d_head) {
+    draw_band_text();
+  }
+  uint16_t st = bop_state();
+  if (st != bop_drawn) {
+    if (!host && (st & 3) != (bop_drawn & 3)) {
+      draw_band_text(); /* Bop's line follows his mood */
+    }
+    draw_bop_corner(st);
+  }
+  if (d_foot || d_chord) {
     draw_main_meter();
   }
-  if (d_page || d_bop || d_chord || d_notes) {
-    draw_bop_corner();
+  d_page = d_chord = d_notes = d_pills = d_foot = d_head = d_host = d_bop = d_step = d_band = d_ov = 0;
+}
+
+/* ---- the settings pages: a title with on/off and the page dots, the four knobs as rows, a picture of the
+ * setting, a hint. ARP, CHORD, SCALE, SPLIT are the < > pages after the playing page. */
+static int page_index(void) {
+  static const uint8_t P[5] = {PG_MAIN, PG_ARP, PG_CHORD, PG_SCALE, PG_SPLIT};
+  for (int k = 0; k < 5; k++) {
+    if (P[k] == page) {
+      return k;
+    }
   }
-  if (d_page || d_host) {
-    draw_host();
+  return -1;
+}
+
+/* the arp's pattern over three held notes and its octaves, as 16 bars; a notch on each beat */
+static void draw_arp_picture(int y) {
+  int n = 3 * (cfg.arp_oct ? cfg.arp_oct : 1);
+  int bw = 11, step = 13, x0 = MX + (SCREEN_W - 2 * MX - 16 * step + 2) / 2, h = 30;
+  int pos = 0, dir = 1;
+  uint32_t r = 7;
+  for (int i = 0; i < 16; i++) {
+    int v;
+    if (cfg.arp_pat == 1) {
+      v = n - 1 - i % n;
+    } else if (cfg.arp_pat == 2) {
+      v = pos;
+      if (pos + dir >= n || pos + dir < 0) {
+        dir = -dir;
+      }
+      pos += dir;
+    } else if (cfg.arp_pat == 3) {
+      r = r * 1103515245u + 12345u;
+      v = (int)(r >> 16) % n;
+    } else {
+      v = i % n;
+    }
+    int bh = 4 + v * (h - 4) / (n > 1 ? n - 1 : 1);
+    rect(x0 + i * step, y + h - bh, bw, bh, cfg.arp_on ? C_ACC : C_LINE);
+    if (i % ARP_SUB[cfg.arp_rate < 5 ? cfg.arp_rate : 0] == 0) {
+      rect(x0 + i * step, y + h + 3, bw, 1, C_MUT);
+    }
   }
-  d_page = d_chord = d_notes = d_pills = d_foot = d_head = d_host = d_bop = 0;
 }
 
 static void draw_mode_page(void) {
-  const char* lab[4];
-  char vbuf[4][20];
-  const char* val[4];
+  char vb[4][20];
   clear(C_BG);
-  draw_header();
-  for (int i = 0; i < 4; i++) {
-    vbuf[i][0] = 0;
-    val[i] = "";
-  }
+  int pic = ROW_Y0 + 4 * ROW_H + 8;
   if (page == PG_ARP) {
-    lab[0] = "RATE", lab[1] = "PATTERN", lab[2] = "OCT", lab[3] = "BPM";
-    val[0] = ARP_RATE_NAME[cfg.arp_rate];
-    val[1] = ARP_PAT_NAME[cfg.arp_pat];
-    format_int(vbuf[2], cfg.arp_oct);
-    val[2] = vbuf[2];
-    format_int(vbuf[3], cfg.arp_bpm);
-    val[3] = vbuf[3];
-    text(12, 36, cfg.arp_on ? "ARPEGGIATOR ON" : "ARPEGGIATOR OFF", cfg.arp_on ? C_ACC : C_MUT, FONT_SMALL);
+    draw_title("arp", cfg.arp_on, 0);
+    lower(vb[0], ARP_RATE_NAME[cfg.arp_rate], 20);
+    lower(vb[1], ARP_PAT_NAME[cfg.arp_pat], 20);
+    format_int(vb[2], cfg.arp_oct);
+    format_int(vb[3], cfg.arp_bpm);
+    draw_knob_row(0, "rate", vb[0], C_TXT);
+    draw_knob_row(1, "pattern", vb[1], C_TXT);
+    draw_knob_row(2, "octaves", vb[2], C_TXT);
+    draw_knob_row(3, "bpm", vb[3], C_BLUE);
+    draw_arp_picture(pic);
+    draw_hint("arp: on/off  pad 1: tap");
   } else if (page == PG_CHORD) {
-    lab[0] = "ON", lab[1] = "SHAPE", lab[2] = "NOTES", lab[3] = "";
-    val[0] = cfg.chord_on ? "ON" : "OFF";
-    val[1] = chord_shape_name();
-    format_int(vbuf[2], cfg.chord_n);
-    val[2] = vbuf[2];
-    text(12, 36, "CHORD MEMORY", C_TXT, FONT_SMALL);
+    draw_title("chord", cfg.chord_on, 0);
+    lower(vb[1], chord_shape_name(), 20);
+    format_int(vb[2], cfg.chord_n);
+    draw_knob_row(0, "memory", cfg.chord_on ? "on" : "off", cfg.chord_on ? C_ACC : C_MUT);
+    draw_knob_row(1, "shape", vb[1], C_TXT);
+    draw_knob_row(2, "notes", vb[2], C_TXT);
+    /* the shape on C4 */
+    uint8_t held[128] = {0};
+    for (int i = 0; i < cfg.chord_n && i < 8; i++) {
+      int nn = 60 + cfg.chord_iv[i];
+      if (nn >= 0 && nn < 128) {
+        held[nn] = 1;
+      }
+    }
+    draw_keys(MX, ROW_Y0 + 3 * ROW_H + 10, SCREEN_W - 2 * MX, 40, 60, 83, held, 0, cfg.chord_on ? C_ACC : C_MUT,
+              1u, -1);
+    draw_hint("hold keys + chord: learn");
   } else if (page == PG_SCALE) {
-    lab[0] = "ON", lab[1] = "ROOT", lab[2] = "TYPE", lab[3] = "";
-    val[0] = cfg.scale_on ? "ON" : "OFF";
-    val[1] = NOTE_NAME[cfg.scale_root];
-    val[2] = SCALE_NAME[cfg.scale_type];
-    text(12, 36, "SCALE LOCK", C_TXT, FONT_SMALL);
+    draw_title("scale", cfg.scale_on, 0);
+    lower(vb[1], NOTE_NAME[cfg.scale_root], 20);
+    lower(vb[2], SCALE_NAME[cfg.scale_type], 20);
+    draw_knob_row(0, "lock", cfg.scale_on ? "on" : "off", cfg.scale_on ? C_ACC : C_MUT);
+    draw_knob_row(1, "root", vb[1], C_TXT);
+    draw_knob_row(2, "type", vb[2], C_TXT);
+    uint16_t m = (uint16_t)(((SCALE_MASK[cfg.scale_type] << cfg.scale_root) |
+                             (SCALE_MASK[cfg.scale_type] >> (12 - cfg.scale_root))) &
+                            0xFFFu);
+    draw_keys(MX, ROW_Y0 + 3 * ROW_H + 10, SCREEN_W - 2 * MX, 40, 48, 71, 0, m, cfg.scale_on ? C_ACC : C_MUT,
+              (uint16_t)(1u << cfg.scale_root), -1);
+    draw_hint("scale: on/off");
   } else {
-    lab[0] = "ON", lab[1] = "SPLIT", lab[2] = "LO CH", lab[3] = "HI CH";
-    val[0] = cfg.split_on ? "ON" : "OFF";
-    int oct = cfg.split_note / 12 - 1;
-    vbuf[1][0] = 0;
+    draw_title("split", cfg.split_on, 0);
     int q = 0;
     for (int k = 0; NOTE_NAME[cfg.split_note % 12][k]; k++) {
-      vbuf[1][q++] = NOTE_NAME[cfg.split_note % 12][k];
+      vb[1][q++] = NOTE_NAME[cfg.split_note % 12][k];
     }
-    vbuf[1][q++] = (char)('0' + (oct < 0 ? 0 : oct > 9 ? 9
-                                                       : oct));
-    vbuf[1][q] = 0;
-    val[1] = vbuf[1];
-    format_int(vbuf[2], cfg.split_lo_ch);
-    val[2] = vbuf[2];
-    format_int(vbuf[3], cfg.split_hi_ch);
-    val[3] = vbuf[3];
-    text(12, 36, "KEYBOARD SPLIT", C_TXT, FONT_SMALL);
+    int oct = cfg.split_note / 12 - 1;
+    vb[1][q++] = (char)('0' + (oct < 0 ? 0 : oct > 9 ? 9 : oct));
+    vb[1][q] = 0;
+    lower(vb[1], vb[1], 20);
+    char lo[12] = "ch ", hi[12] = "ch ";
+    format_int(lo + 3, cfg.split_lo_ch);
+    format_int(hi + 3, cfg.split_hi_ch);
+    draw_knob_row(0, "split", cfg.split_on ? "on" : "off", cfg.split_on ? C_ACC : C_MUT);
+    draw_knob_row(1, "at", vb[1], C_TXT);
+    draw_knob_row(2, "low", lo, C_TXT);
+    draw_knob_row(3, "high", hi, C_TXT);
+    draw_keys(MX, pic, SCREEN_W - 2 * MX, 30, keys_lo(), keys_hi(), 0, 0, C_ACC, 0, cfg.split_note);
+    draw_hint("k1: on/off  oct-: back");
   }
-  for (int i = 0; i < 4; i++) {
-    int x = 8 + i * 58, y = 58;
-    rect(x, y, 54, 86, C_CARD);
-    frame(x, y, 54, 86, C_LINE);
-    text(x + (54 - text_width(lab[i], FONT_SMALL)) / 2, y + 6, lab[i], C_MUT, FONT_SMALL);
-    int sc = text_width(val[i], FONT_BIG) <= 50 ? FONT_BIG : FONT_SMALL;
-    int w = text_width(val[i], sc);
-    text(x + (54 - w) / 2, y + 34 + (sc == FONT_BIG ? 0 : 8), val[i], C_ACC, sc);
-    char k[8] = "K1";
-    if (i < 3 || page != PG_CHORD) {
-      k[1] = (char)('1' + i);
-      text(x + (54 - text_width(k, FONT_SMALL)) / 2, y + 70, k, C_LINE, FONT_SMALL);
+}
+
+/* ---- MAP: every control as a row, lowercase, with a scrollbar */
+#define MAP_ROWS 11
+static void draw_map(void) {
+  rect(0, 0, SCREEN_W, SCREEN_H, C_BG);
+  char b[16], c[8];
+  format_int(b, map_sel + 1);
+  format_int(c, n_rows);
+  int i = str_len(b);
+  b[i++] = ' ', b[i++] = 'o', b[i++] = 'f', b[i++] = ' ';
+  for (int k = 0; c[k]; k++) {
+    b[i++] = c[k];
+  }
+  b[i] = 0;
+  draw_title("map", -1, b);
+  if (map_sel < map_top) {
+    map_top = map_sel;
+  }
+  if (map_sel > map_top + MAP_ROWS - 1) {
+    map_top = map_sel - (MAP_ROWS - 1);
+  }
+  for (int r = 0; r < MAP_ROWS && map_top + r < n_rows; r++) {
+    int ri = map_top + r, y = 28 + r * 17;
+    char label[16], value[32], lv[32];
+    row_label(ri, label);
+    row_value(ri, value);
+    lower(lv, value, sizeof lv);
+    if (ri == map_sel) {
+      rect(MX - 4, y - 1, SCREEN_W - 2 * MX + 2, 17, C_SEL);
+      rect(MX - 4, y - 1, 2, 17, C_ACC);
     }
+    mono(MX + 2, y, label, ri == map_sel ? C_TXT : C_MUT);
+    mono_r(SCREEN_W - MX - 6, y, lv, ri == map_sel ? C_ACC : C_TXT);
   }
-  if (saved_at && millis() - saved_at < 1500u) {
-    text(12, 216, "SAVED TO FLASH", C_ACC, FONT_SMALL);
+  /* the scrollbar */
+  int th = 28 + MAP_ROWS * 17 - 28, kh = th * MAP_ROWS / n_rows, ky = 28 + (th - kh) * map_top / (n_rows - MAP_ROWS);
+  rect(SCREEN_W - MX - 1, 28, 1, th, C_CARD);
+  rect(SCREEN_W - MX - 2, ky, 3, kh, C_MUT);
+  draw_hint("oct+: edit  oct-: back");
+}
+
+/* ---- EDIT: the control's message as the four knobs' rows */
+static void draw_edit(void) {
+  rect(0, 0, SCREEN_W, SCREEN_H, C_BG);
+  map_t* m = &cfg.map[edit_slot];
+  char label[16], val[4][12];
+  row_label(slot_row(edit_slot), label);
+  draw_title("edit", -1, label);
+  lower(val[0], msg_name(m->type), 12);
+  if (m->type == MSG_PITCH) {
+    val[1][0] = '-', val[1][1] = 0;
+  } else {
+    format_int(val[1], m->num);
   }
+  format_int(val[2], m->chan);
+  int kind = map_kind(edit_slot);
+  int modes = kind == CTL_BUTTON || kind == CTL_KNOB;
+  lower(val[3], modes ? mode_name(m->mode) : "-", 12);
+  draw_knob_row(0, "type", val[0], C_TXT);
+  draw_knob_row(1, m->type == MSG_NOTE ? "note" : "number", val[1], C_TXT);
+  draw_knob_row(2, "channel", val[2], C_TXT);
+  draw_knob_row(3, "mode", val[3], modes ? C_TXT : C_LINE);
+  draw_hint("chord: reset  oct-: back");
 }
 
 static void redraw(void) {
@@ -1272,23 +1810,28 @@ static void midi_in(void) {
         }
         if (pad >= 0) {
           host_rgb[pad] = (hi == 0x90 && d2) ? hsv565((uint32_t)d2 * 2u, 190, 235) : 0;
+          host_vel[pad] = (hi == 0x90) ? d2 : 0;
           host_on = 1;
+          d_step = 1;
         }
       } else if (hi == 0xB0) {
-        if (d1 >= 107 && d1 <= 119) {
+        if (d1 >= 104 && d1 <= 119) {
           hb_cc(d1, d2);
         } else if (d1 >= 41 && d1 < 41 + N_BTN_UI) {
           host_btn[d1 - 41] = d2 > 0;
           hb_seen = millis() ? millis() : 1;
         } else if (d1 >= 20 && d1 < 36) {
           host_rgb[d1 - 20] = d2 ? hsv565((uint32_t)d2 * 2u, 190, 235) : 0;
+          host_vel[d1 - 20] = d2;
           host_on = 1;
+          d_step = 1;
         } else if (d1 == 16) {
           cfg.pad_bright = d2 ? (uint8_t)(d2 * 2u) : 8;
           cfg_changed();
         } else if (d1 == 17) {
           for (int p = 0; p < 16; p++) {
             host_rgb[p] = 0;
+            host_vel[p] = 0;
           }
           host_on = 0;
         }
@@ -1631,6 +2174,7 @@ void setup(void) {
   arp_dirty = 1;
   build_note_text();
   last_vel = 0;
+  act_at = millis();
   ui_full();
   /* the boot splash: Bop and the wordmark, for a moment */
   clear(C_BG);
@@ -2002,9 +2546,14 @@ void loop(void) {
       }
       int slot = cfg.knob_bank * N_KNOB_PHYS + i;
       map_t* m = &cfg.map[map_of(CTL_KNOB, slot)];
+      char kn[8] = "knob a1";
+      kn[5] = (char)(slot < N_KNOB_PHYS ? 'a' : 'b');
+      kn[6] = (char)('1' + slot % N_KNOB_PHYS);
+      ctl_name = kn;
       if (m->mode == MODE_REL) {
         int v = 64 + (d > 0 ? (d > 63 ? 63 : d) : (d < -63 ? -63 : d));
         send_map(m, (uint8_t)v, 1);
+        ctl_name = 0;
         continue;
       }
       int v = knob_val[slot] + d;
@@ -2014,13 +2563,19 @@ void loop(void) {
         knob_val[slot] = (uint8_t)v;
         send_map(m, knob_val[slot], 1);
       }
+      ctl_name = 0;
     }
     for (int i = 0; i < fader_count(); i++) {
       int v = fader(i);
       if (v != fader_prev[i]) {
         fader_prev[i] = (uint8_t)v;
         int slot = cfg.fader_bank * N_FADER_PHYS + i;
+        char fn[9] = "fader a1";
+        fn[6] = (char)(slot < N_FADER_PHYS ? 'a' : 'b');
+        fn[7] = (char)('1' + slot % N_FADER_PHYS);
+        ctl_name = fn;
         send_map(&cfg.map[map_of(CTL_FADER, slot)], (uint8_t)v, 1);
+        ctl_name = 0;
       }
     }
     for (int i = 0; i < N_BTN_UI; i++) {
@@ -2059,7 +2614,9 @@ void loop(void) {
                            (uint8_t)((raw << 4) >> 7)};
         send_msg(bend);
       } else {
+        ctl_name = i ? "mod wheel" : "pitch wheel";
         send_map(m, (uint8_t)(raw >> 3), 1);
+        ctl_name = 0;
       }
     }
     {
@@ -2110,20 +2667,21 @@ void loop(void) {
   if (cfg_dirty && millis() - cfg_dirty_at > 2500u && !button_held(BTN_SAVE)) {
     cfg_save();
   }
-  if (cc_at && millis() - cc_at >= 1500u) {
-    cc_at = 0;
-    d_foot = 1;
-  }
-  if (hb_overlay_at && millis() - hb_overlay_at >= 1500u) {
-    hb_overlay_at = 0;
-    d_host = 1;
+  if (ov_at && millis() - ov_at >= 1500u) { /* the overlay goes: the top half comes back */
+    ov_at = 0;
+    d_host = d_chord = 1;
   }
   {
     static int was_active;
     int a = hb_active();
     if (a != was_active) {
       was_active = a;
-      d_host = d_bop = 1;
+      if (a) {
+        hb_hi_at = millis() ? millis() : 1; /* Bop says hi */
+      } else {
+        ov_at = 0;
+      }
+      ui_full(); /* the other layout */
     }
   }
   {

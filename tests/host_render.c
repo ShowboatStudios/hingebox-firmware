@@ -700,6 +700,71 @@ int main(void) {
     midi_push(0xBF, 107, 80);
     tick();
     shot("knob");
+    /* screen v3: the knob in its deck colour (CC 106), the track's colour (CC 104), a fill (CC 105), the beat */
+    if (strcmp(ov_name, "reverb") || !ov_pct) {
+      printf("overlay: \"%s\"\n", ov_name);
+      return 1;
+    }
+    {
+      int caps = -1;
+      for (int i = 0; i < sent_count && i < 64; i++)
+        if (sent[i][0] == 0xBF && sent[i][1] == 118)
+          caps = sent[i][2];
+      if (caps != 15) {
+        printf("hello: capabilities %d, want 15\n", caps);
+        return 1;
+      }
+    }
+    if (hue_colour(10) != DECK[0] || hue_colour(80) != DECK[1]) {
+      printf("hue_colour: the deck's kick / snare hues are not the deck's colours\n");
+      return 1;
+    }
+    const char* k2 = "swing";
+    midi_push(0xBF, 110, 2);
+    for (int i = 0; k2[i]; i++) midi_push(0xBF, 109, (uint8_t)k2[i]);
+    midi_push(0xBF, 108, 0);
+    midi_push(0xBF, 106, 2); /* clap pink */
+    midi_push(0xBF, 107, 40);
+    tick();
+    shot("knob-colour");
+    if (ov_col != DECK[2]) {
+      printf("overlay colour: not the clap's pink\n");
+      return 1;
+    }
+    now_ms += 1600; /* the overlay goes */
+    const char* t2 = "snare";
+    midi_push(0xBF, 110, 1);
+    for (int i = 0; t2[i]; i++) midi_push(0xBF, 109, (uint8_t)t2[i]);
+    midi_push(0xBF, 108, 0);
+    midi_push(0xBF, 104, 1); /* snare blue */
+    for (int p = 0; p < 16; p++) midi_push(0x9F, (uint8_t)(36 + p), (p == 4 || p == 12 || p == 14) ? 80 : 0);
+    midi_push(0xBF, 113, 9);
+    tick();
+    press_key(base + 2); /* D F A C: dm7 */
+    press_key(base + 5);
+    press_key(base + 9);
+    press_key(base + 12);
+    tick();
+    shot("hb-chord");
+    release_key(base + 2);
+    release_key(base + 5);
+    release_key(base + 9);
+    release_key(base + 12);
+    tick();
+    midi_push(0xBF, 113, 6);
+    tick();
+    shot("hb-beat");
+    midi_push(0xBF, 105, 1); /* a fill */
+    midi_push(0xBF, 113, 8);
+    tick();
+    shot("hb-fill");
+    if (bop_mood() != BOP_WOW) {
+      printf("bop: not surprised by the fill (%d)\n", bop_mood());
+      return 1;
+    }
+    midi_push(0xBF, 113, 127);
+    tick();
+    shot("hb-stopped");
     now_ms += 5000;
     tick();
     tick();
@@ -707,6 +772,46 @@ int main(void) {
       printf("host: still active after 5 s of quiet\n");
       return 1;
     }
+  }
+
+  /* screen v3: the modes in the status bar and beside Bop, scale dots and the split on the strip, BLE */
+  {
+    page_set(PG_MAIN);
+    cfg.arp_on = 1;
+    cfg.scale_on = 1;
+    cfg.scale_root = 2;
+    cfg.scale_type = SC_DORIAN;
+    cfg.split_on = 1;
+    cfg.split_note = 60;
+    bt_ready = 1;
+    ui_full();
+    press_key(base + 2);
+    press_key(base + 5);
+    tick();
+    shot("modes");
+    release_key(base + 2);
+    release_key(base + 5);
+    cfg.arp_on = cfg.scale_on = cfg.split_on = 0;
+    bt_ready = 0;
+    cfg.transpose = 12;
+    ui_full();
+    tick();
+    now_ms += 61000; /* a minute of nothing: Bop sleeps */
+    tick();
+    shot("sleepy");
+    if (bop_mood() != BOP_SLEEPY) {
+      printf("bop: not sleepy after a minute (%d)\n", bop_mood());
+      return 1;
+    }
+    press_key(base + 0);
+    tick();
+    if (bop_mood() == BOP_SLEEPY) {
+      printf("bop: a key did not wake him\n");
+      return 1;
+    }
+    release_key(base + 0);
+    cfg.transpose = 0;
+    tick();
   }
 
   printf("%s: ok, save called %d, sent %d, chord \"%s\", arp/banks/scale/chord ok\n",

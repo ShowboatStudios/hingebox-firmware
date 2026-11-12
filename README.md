@@ -115,6 +115,14 @@ stops). On the FM-1 the SAVE button also writes immediately.
 Mappable buttons (every other labelled button keeps its job): PARA, NOTE REPEAT, FX, SEQ, PLAY, REC on the SMK-37;
 FX, ENV, LFO, SEQ, PLAY, REC on the FM-1.
 
+## Screen
+
+The playing page shows the chord big with its notes, a strip of the keys you hold (scale notes dotted, the split
+marked), Bop (happy on chords, sleepy after a minute, bobbing on Hingebox's beat) and the last velocity. With the
+Hingebox app connected it mirrors the deck: groove, track, tempo, the pads with the playhead, and each knob's name
+and value as you turn it. The settings pages show each knob's job as a row and a picture of the setting.
+Screenshots: `sh tests/run.sh` writes them to `build/`; the design notes are in `docs/SCREEN-REVIEW.md`.
+
 ## Map a control on the screen
 
 `GLO` (GLOBE) opens **MAP**: one row per control, with what it sends.

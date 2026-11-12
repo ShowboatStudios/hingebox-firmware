@@ -13,7 +13,8 @@ that answer the hello (below) will react.
 |---|---|
 | CC 119, any value | CC 119 = protocol (1), CC 118 = capabilities, CC 117 = version (2 = 0.2) |
 
-Capabilities (CC 118 bits): 1 pad lights, 2 screen, 4 button lights.
+Capabilities (CC 118 bits): 1 pad lights, 2 screen, 4 button lights, 8 screen extras (CC 104-106 below; screen
+v3, 2026-11-12). A keyboard that answers 7 ignores CC 104-106, so a host can send them to any unit.
 
 The keyboard treats the host as **connected** for 4 seconds after any message below; send the playhead (CC 113) at
 least every 2 seconds to stay connected. When the host goes quiet the screen goes back to its own page.
@@ -41,8 +42,21 @@ Host colours live in RAM only: streaming a playhead never writes flash.
 | CC 113, step | playhead 0-15, or 127 for stopped |
 | CC 107, value | the knob in slot 2 moved: show its name and this value (0-127) for 1.5 s |
 
-With a host connected, the bottom of the screen shows the groove, tempo and track, the pads as a 2x8 grid with the
-playhead framed, and Bop (Hingebox's robot) bobbing on the beat.
+### Screen extras (capability 8, additive)
+
+| Message | Meaning |
+|---|---|
+| CC 104, index | the track's colour (slot 1's swatch and name): 0 kick orange, 1 snare blue, 2 clap pink, 3 hat yellow, 4 open green, 5 tom lilac, 6 perc white, 7 bass green; 127 = default (orange) |
+| CC 106, index | the knob's colour, same indices; send it before CC 107. It stays until changed (127 = orange) |
+| CC 105, moment | a moment for Bop: 1 fill, 2 drop (surprised), 3 cheer (happy), for 1.5 s; 0 nothing |
+
+Pads sent in the deck's track hues (velocity 10, 80, 115, 22, 48, 95, 64; 20 fill, 3 drop: Hingebox's
+`Keyboards.trackHue`) are drawn on the screen's grid in the deck's exact colours; other hues round the colour wheel.
+
+With a host connected the screen shows a deck row (groove, the track in its colour, the tempo), the chord, the
+keys held, Bop, and the pads as a 2x8 grid with the playhead framed and marked under its column; a link mark
+in the status bar says the host is there. With no chord held the chord's place shows the beat as four blocks.
+The knob overlay (CC 107) shows the name at 2x, the value as a percentage and a bar, in the CC 106 colour.
 
 ## Buttons (capability 4)
 
