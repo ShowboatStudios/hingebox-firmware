@@ -88,7 +88,7 @@ int main(void) {
   map_default(CTL_PAD, 3, 1, &m);
   eqi("pad default type", m.type, MSG_NOTE);
   eqi("pad default note", m.num, 39);
-  eqi("pad default channel", m.chan, 1);
+  eqi("pad default channel (Hingebox: 10)", m.chan, 10);
   map_default(CTL_KNOB, 1, 0, &m);
   eqi("knob default cc", m.num, 22);
   map_default(CTL_KEYS, 0, 1, &m);

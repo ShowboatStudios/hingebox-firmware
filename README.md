@@ -1,3 +1,19 @@
+# Hingebox firmware (a fork of DUMBMIDI)
+
+The SMK-37 (Pro, Elite, MKE-P37) and FM-1 firmware that [Hingebox](https://github.com/ShowboatStudios/hingebox)
+offers to install: a fork of [konsumer/dumbmidi](https://github.com/konsumer/dumbmidi) (GPL-3.0, all credit for
+the firmware to konsumer and the FOMA platform), with these changes:
+
+- Pad colours a host streams on channel 16 live in RAM only: Hingebox lights the pads with its step grid and a
+  running playhead, which in DUMBMIDI rewrote the saved settings (flash) every time the stream paused. CC 17 = 0
+  hands the pads back to the saved colours.
+- Pads send on channel 10 out of the box (notes 36-51), so they never collide with the keys (from 48, channel 1).
+- Named HINGEBOX; packages `hingebox-smk37[-elite|-mke]-<version>.fwsc`.
+
+Flashing is at your own risk: back up the unit's flash first (see below and genkigenki/fm1-to-smk37 docs/02).
+
+---
+
 # DUMBMIDI
 
 ![DUMBMIDI on the SMK-37](docs/screen.png)

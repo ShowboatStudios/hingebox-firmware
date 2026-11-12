@@ -418,6 +418,14 @@ static uint16_t bright565(uint16_t c, uint32_t factor) { /* factor 0..255 */
   return (uint16_t)(r << 11 | g << 5 | b);
 }
 
+/* ---- Hingebox: pad colours a host streams (a step grid's playhead changes them every step) live in RAM only.
+ * dumbmidi saved them into the settings, which wrote flash each time the stream paused. CC17 = 0 hands the pads
+ * back to the saved colours. */
+static uint16_t host_rgb[16];
+static uint8_t host_on;
+
+static uint16_t pad_colour(int p) { return host_on ? host_rgb[p] : cfg.pad_rgb[p]; }
+
 static void refresh_pads(void) {
   if (!pad_count()) {
     return;
@@ -430,7 +438,7 @@ static void refresh_pads(void) {
     return;
   }
   for (int p = 0; p < 16; p++) {
-    uint16_t c = cfg.pad_rgb[p] ? bright565(cfg.pad_rgb[p], cfg.pad_bright) : 0;
+    uint16_t c = pad_colour(p) ? bright565(pad_colour(p), cfg.pad_bright) : 0;
     if (pad_held(p)) {
       c = c ? blend565(c, WHITE, 150) : RGB(180, 190, 205);
     }
@@ -442,7 +450,7 @@ static void refresh_key_leds(void) {
 #if !BOARD_SMK37
   uint32_t lit = 0;
   for (int p = 0; p < 16; p++) {
-    if (cfg.pad_rgb[p]) {
+    if (pad_colour(p)) {
       lit |= 1u << WHITE_KEY[p];
     }
   }
@@ -1067,25 +1075,21 @@ static void midi_in(void) {
           pad = d1;
         }
         if (pad >= 0) {
-          if (hi == 0x90 && d2) {
-            cfg.pad_rgb[pad] = hsv565((uint32_t)d2 * 2u, 190, 235);
-          } else {
-            cfg.pad_rgb[pad] = 0;
-          }
-          cfg_changed();
+          host_rgb[pad] = (hi == 0x90 && d2) ? hsv565((uint32_t)d2 * 2u, 190, 235) : 0;
+          host_on = 1;
         }
       } else if (hi == 0xB0) {
         if (d1 >= 20 && d1 < 36) {
-          cfg.pad_rgb[d1 - 20] = d2 ? hsv565((uint32_t)d2 * 2u, 190, 235) : 0;
-          cfg_changed();
+          host_rgb[d1 - 20] = d2 ? hsv565((uint32_t)d2 * 2u, 190, 235) : 0;
+          host_on = 1;
         } else if (d1 == 16) {
           cfg.pad_bright = d2 ? (uint8_t)(d2 * 2u) : 8;
           cfg_changed();
         } else if (d1 == 17) {
           for (int p = 0; p < 16; p++) {
-            cfg.pad_rgb[p] = 0;
+            host_rgb[p] = 0;
           }
-          cfg_changed();
+          host_on = 0;
         }
       }
       continue;

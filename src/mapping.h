@@ -100,7 +100,7 @@ static inline void map_default(int kind, int i, int smk, map_t* m) {
     case CTL_PAD:
       m->type = MSG_NOTE;
       m->num = (uint8_t)(36 + i);
-      m->chan = 1;
+      m->chan = 10; /* Hingebox: pads on 10, so notes 36-51 never collide with the keys from 48 on 1 */
       m->mode = MODE_MOM;
       break;
     case CTL_KNOB: { /* the bank's CCs: A 21..28, B 31..38 */
