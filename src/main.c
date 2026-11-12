@@ -440,6 +440,8 @@ static int hb_step = -1;
 static uint16_t hb_bpm;
 static uint32_t hb_seen, hb_overlay_at;
 static uint8_t d_host = 1, d_bop = 1;
+/* the six mapped buttons' lights as Hingebox says (CC 41-46 on channel 16: SEQ PLAY lit while playing...) */
+static uint8_t host_btn[N_BTN_UI];
 static uint32_t splash_until;
 
 static int hb_active(void) { return hb_seen && millis() - hb_seen < 4000u; }
@@ -1247,6 +1249,9 @@ static void midi_in(void) {
       } else if (hi == 0xB0) {
         if (d1 >= 107 && d1 <= 119) {
           hb_cc(d1, d2);
+        } else if (d1 >= 41 && d1 < 41 + N_BTN_UI) {
+          host_btn[d1 - 41] = d2 > 0;
+          hb_seen = millis() ? millis() : 1;
         } else if (d1 >= 20 && d1 < 36) {
           host_rgb[d1 - 20] = d2 ? hsv565((uint32_t)d2 * 2u, 190, 235) : 0;
           host_on = 1;
@@ -1526,6 +1531,13 @@ static void scale_toggle(void) {
 
 /* the buttons that do something on this page glow dimly (the solid ones are the state) */
 static void refresh_dim(void) {
+  /* the six mapped buttons: dim = usable; lit while held, or while Hingebox says (playing, recording) */
+  for (int i = 0; i < N_BTN_UI; i++) {
+    led_button_dim(BTN_ID[i], 1);
+    if (hb_active()) {
+      led_button(BTN_ID[i], host_btn[i] || button_held(BTN_ID[i]));
+    }
+  }
   led_button_dim(BTN_GLO, 1);
   led_button(BTN_GLO, page == PG_MAP);
 #if BOARD_SMK37
