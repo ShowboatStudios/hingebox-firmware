@@ -18,10 +18,11 @@
 
 /* ---- the look: near-black, one accent, colour by pitch class */
 #define C_BG RGB(5, 5, 6) /* Hingebox: the pad's OLED black */
-#define C_CARD RGB(19, 23, 30)
-#define C_LINE RGB(38, 45, 56)
+#define C_CARD RGB(24, 24, 26) /* neutral greys, as the app (Fable pass 2) */
+#define C_LINE RGB(44, 44, 46)
 #define C_TXT RGB(237, 237, 232)
-#define C_MUT RGB(112, 124, 142)
+#define C_MUT RGB(125, 125, 120)
+#define C_BLUE RGB(47, 107, 255) /* Hingebox blue: the tempo, as on the deck */
 #define C_ACC RGB(255, 92, 31) /* Hingebox orange */
 #define C_BOPBODY RGB(40, 40, 42)
 #define C_SEL RGB(64, 26, 10)
@@ -444,6 +445,20 @@ static uint8_t d_host = 1, d_bop = 1;
 static uint8_t host_btn[N_BTN_UI];
 static uint32_t splash_until;
 
+/* lowercase, in the 8x16 bitmap mono (the app's labels are lowercase mono) */
+static int mono(int x, int y, const char* s, uint16_t c) {
+  char b[40];
+  int i = 0;
+  for (; s[i] && i < 39; i++) {
+    b[i] = (s[i] >= 'A' && s[i] <= 'Z') ? (char)(s[i] + 32) : s[i];
+  }
+  b[i] = 0;
+  return text(x, y, b, c, FONT_SMALL);
+}
+static void mono_c(int y, const char* s, uint16_t c) {
+  mono((SCREEN_W - text_width(s, FONT_SMALL)) / 2, y, s, c);
+}
+
 static int hb_active(void) { return hb_seen && millis() - hb_seen < 4000u; }
 
 static void hb_cc(uint8_t cc, uint8_t v) {
@@ -636,14 +651,14 @@ static void draw_main_status(void) {
   /* the wordmark, as on the app: "hinge" in white, "box" in orange */
   int wx = aa_text(14, 1, "hinge", C_TXT, AA_SMALL);
   aa_text(wx, 1, "box", C_ACC, AA_SMALL);
-  aa_text(92, 1, b, C_MUT, AA_SMALL);
+  mono(92, 4, b, C_MUT);
   int x = 150;
-  aa_text(x, 1, "A", cfg.arp_on ? C_ACC : C_LINE, AA_SMALL);
-  aa_text(x + 14, 1, "C", cfg.chord_on ? C_ACC : C_LINE, AA_SMALL);
-  aa_text(x + 28, 1, "S", cfg.scale_on ? C_ACC : C_LINE, AA_SMALL);
-  aa_text(x + 42, 1, "P", cfg.split_on ? C_ACC : C_LINE, AA_SMALL);
+  mono(x, 4, "a", cfg.arp_on ? C_ACC : C_LINE);
+  mono(x + 14, 4, "c", cfg.chord_on ? C_ACC : C_LINE);
+  mono(x + 28, 4, "s", cfg.scale_on ? C_ACC : C_LINE);
+  mono(x + 42, 4, "p", cfg.split_on ? C_ACC : C_LINE);
   if (bt_ready) {
-    aa_text_r(SCREEN_W - 14, 1, "BLE", C_ACC, AA_SMALL);
+    mono(SCREEN_W - 14 - 3 * 8, 4, "ble", C_ACC);
   }
 }
 
@@ -665,7 +680,7 @@ static void draw_main_chord(void) {
 static void draw_main_notes(void) {
   rect(0, 104, SCREEN_W, 30, C_BG);
   if (notes_txt[0]) {
-    aa_text_c(0, 110, SCREEN_W, notes_txt, C_MUT, AA_SMALL);
+    mono_c(110, notes_txt, C_MUT);
   }
 }
 
@@ -936,7 +951,7 @@ static void draw_host(void) {
   }
   if (hb_overlay_at && millis() - hb_overlay_at < 1500u) {
     /* a knob just moved: its Hingebox name and a bar */
-    aa_text(66, 168, hb_text[2][0] ? hb_text[2] : "knob", C_TXT, AA_SMALL);
+    mono(66, 168, hb_text[2][0] ? hb_text[2] : "knob", C_TXT);
     rect(66, 192, SCREEN_W - 82, 6, C_LINE);
     rect(66, 192, hb_overlay_val * (SCREEN_W - 82) / 127, 6, C_ACC);
     char v[14];
@@ -946,10 +961,10 @@ static void draw_host(void) {
       n++;
     }
     v[n] = '%', v[n + 1] = 0;
-    aa_text_r(SCREEN_W - 16, 200, v, C_MUT, AA_SMALL);
+    mono(SCREEN_W - 16 - text_width(v, FONT_SMALL), 202, v, C_MUT);
     return;
   }
-  aa_text(66, 166, hb_text[0][0] ? hb_text[0] : "hingebox", C_TXT, AA_SMALL);
+  mono(66, 166, hb_text[0][0] ? hb_text[0] : "hingebox", C_TXT);
   char line[24];
   int i = 0;
   if (hb_bpm) {
@@ -964,10 +979,23 @@ static void draw_host(void) {
     }
   }
   line[i] = 0;
-  aa_text(66, 186, line, C_MUT, AA_SMALL);
-  aa_text(66, 204, hb_text[1], C_ACC, AA_SMALL);
+  if (line[0]) {
+    /* the number in Hingebox blue, "bpm" after it in grey */
+    int n = 0;
+    while (line[n] && line[n] != ' ') {
+      n++;
+    }
+    char num[8];
+    for (int k = 0; k < n && k < 7; k++) {
+      num[k] = line[k];
+    }
+    num[n < 7 ? n : 7] = 0;
+    int nx = mono(66, 185, num, C_BLUE);
+    mono(nx + 4, 185, "bpm", C_MUT);
+  }
+  mono(66, 204, hb_text[1], C_ACC);
   /* the pads, as lit, with the playhead framed */
-  int gx = 152, gy = 170, cw = 9, ch = 18, g = 1;
+  int gx = 152, gy = 180, cw = 9, ch = 11, g = 1; /* wider than tall, like the real pads */
   for (int p = 0; p < 16; p++) {
     int x = gx + (p % 8) * (cw + g), y = gy + (p / 8) * (ch + g);
     uint16_t c = pad_colour(p);

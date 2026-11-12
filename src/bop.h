@@ -61,13 +61,17 @@ static void bop_draw(int x, int y, int s, int mood, int lift, uint16_t bg, uint1
   /* eyes */
   int ey = by + bh * 2 / 5, ex0 = bx + bw * 3 / 10, ex1 = bx + bw * 7 / 10;
   int er = mood == BOP_WOW ? s / 9 : s / 12;
+  if (er < 4) {
+    er = 4;
+  }
+  int ew = s >= 70 ? w : 1; /* a thin ring with a pupil at every size, as the app's Bop */
   for (int k = 0; k < 2; k++) {
     int ex = k ? ex1 : ex0;
     if (mood == BOP_SLEEPY) {
       rect(ex - er, ey, 2 * er, w, ink);
     } else {
-      bop_ring(ex, ey, er, w, ink, body);
-      bop_disc(ex, ey, s / 30 + 1, ink);
+      bop_ring(ex, ey, er, ew, ink, body);
+      rect(ex - 1, ey - 1, 2, 2, ink);
     }
   }
   /* mouth: a line, an "o" (wow), a smile (happy) */
