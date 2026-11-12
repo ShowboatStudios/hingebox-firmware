@@ -184,6 +184,13 @@ def flash_image(app, key):
   sfc(region, 0, len(region), 0, key)
   if 0x4000 + len(region) > FLASH_SIZE:  # (the update loader writes up to FLASH_SIZE only)
     raise SystemExit(f"app area too large: ends at 0x{0x4000 + len(region):x}, past 0x{FLASH_SIZE:x}")
+  # Hingebox (2026-11-12): never anywhere near what's unique to a unit. The bootloader head, Bluetooth pairing and
+  # key/pad calibration (BTIF, USRTRIM) and key_mac are written only by the factory; a package that reaches them
+  # fails the build (genkigenki/fm1-to-smk37 docs/02, section 5.1).
+  for lo, hi, what in ((0x0000, 0x4000, "bootloader head"), (0xC0000, 0xC2000, "pairing and calibration"),
+                       (0xFF000, 0x100000, "key_mac")):
+    if 0x4000 < hi and 0x4000 + len(region) > lo:
+      raise SystemExit(f"package would write {what} (0x{lo:x}-0x{hi:x}): refused")
   f[0x4000 : 0x4000 + len(region)] = region
   return bytes(f)
 

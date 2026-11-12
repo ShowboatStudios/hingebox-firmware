@@ -14,15 +14,17 @@
 #include "fm1.h"
 #include "chord.h"
 #include "mapping.h"
+#include "bop.h"
 
 /* ---- the look: near-black, one accent, colour by pitch class */
-#define C_BG RGB(8, 10, 14)
+#define C_BG RGB(5, 5, 6) /* Hingebox: the pad's OLED black */
 #define C_CARD RGB(19, 23, 30)
 #define C_LINE RGB(38, 45, 56)
-#define C_TXT RGB(232, 238, 246)
+#define C_TXT RGB(237, 237, 232)
 #define C_MUT RGB(112, 124, 142)
-#define C_ACC RGB(64, 224, 196)
-#define C_SEL RGB(14, 46, 48)
+#define C_ACC RGB(255, 92, 31) /* Hingebox orange */
+#define C_BOPBODY RGB(40, 40, 42)
+#define C_SEL RGB(64, 26, 10)
 
 #if !BOARD_SMK37
 /* the SMK's pads as the FM-1's white keys (F3 G3 A3 B3 C4 D4 E4 F4 G4 A4 B4 C5 D5 E5 F5 G5) */
@@ -426,6 +428,79 @@ static uint8_t host_on;
 
 static uint16_t pad_colour(int p) { return host_on ? host_rgb[p] : cfg.pad_rgb[p]; }
 
+/* ---- Hingebox's screen (2026-11-12): what the app says, on channel 16 CCs 107-119 (README: host protocol).
+ * 119 any: hello; we answer CC 119 = protocol 1, 118 = what we can do (1 pad lights, 2 screen, 4 buttons), 117 =
+ * version. 113: the playhead step 0-15 (127 stopped). 111/112: tempo high/low 7 bits. 110 slot (0 groove, 1 track,
+ * 2 knob label), 109 a character (ASCII 32-126), 108 show it. 107: the knob's value 0-127 (with slot 2) for 1.5 s. */
+#define HB_VERSION 2 /* 0.2 */
+static char hb_text[3][17];
+static char hb_buf[17];
+static uint8_t hb_slot, hb_len, hb_overlay_val;
+static int hb_step = -1;
+static uint16_t hb_bpm;
+static uint32_t hb_seen, hb_overlay_at;
+static uint8_t d_host = 1, d_bop = 1;
+static uint32_t splash_until;
+
+static int hb_active(void) { return hb_seen && millis() - hb_seen < 4000u; }
+
+static void hb_cc(uint8_t cc, uint8_t v) {
+  hb_seen = millis();
+  if (!hb_seen) {
+    hb_seen = 1;
+  }
+  switch (cc) {
+    case 119:
+      midi_send(0xBF, 119, 1);
+      midi_send(0xBF, 118, 7);
+      midi_send(0xBF, 117, HB_VERSION);
+      d_host = 1;
+      break;
+    case 113:
+      if ((v < 16 ? (int)v : -1) != hb_step) {
+        int was = hb_step;
+        hb_step = v < 16 ? (int)v : -1;
+        d_host = 1;
+        if (was < 0 || hb_step < 0 || (hb_step % 4) == 0 || (was % 4) == 0) {
+          d_bop = 1;
+        }
+      }
+      break;
+    case 111:
+      hb_bpm = (uint16_t)((v << 7) | (hb_bpm & 0x7Fu));
+      d_host = 1;
+      break;
+    case 112:
+      hb_bpm = (uint16_t)((hb_bpm & ~0x7Fu) | v);
+      d_host = 1;
+      break;
+    case 110:
+      hb_slot = v < 3 ? v : 0;
+      hb_len = 0;
+      hb_buf[0] = 0;
+      break;
+    case 109:
+      if (hb_len < 16 && v >= 32 && v < 127) {
+        hb_buf[hb_len++] = (char)v;
+        hb_buf[hb_len] = 0;
+      }
+      break;
+    case 108:
+      for (int i = 0; i < 17; i++) {
+        hb_text[hb_slot][i] = hb_buf[i];
+      }
+      d_host = 1;
+      break;
+    case 107:
+      hb_overlay_val = v;
+      hb_overlay_at = millis() ? millis() : 1;
+      d_host = 1;
+      break;
+    default:
+      break;
+  }
+}
+
 static void refresh_pads(void) {
   if (!pad_count()) {
     return;
@@ -556,7 +631,10 @@ static void draw_main_status(void) {
     b[i++] = (char)('0' + oct);
   }
   b[i] = 0;
-  aa_text(14, 1, b, C_MUT, AA_SMALL);
+  /* the wordmark, as on the app: "hinge" in white, "box" in orange */
+  int wx = aa_text(14, 1, "hinge", C_TXT, AA_SMALL);
+  aa_text(wx, 1, "box", C_ACC, AA_SMALL);
+  aa_text(92, 1, b, C_MUT, AA_SMALL);
   int x = 150;
   aa_text(x, 1, "A", cfg.arp_on ? C_ACC : C_LINE, AA_SMALL);
   aa_text(x + 14, 1, "C", cfg.chord_on ? C_ACC : C_LINE, AA_SMALL);
@@ -823,8 +901,80 @@ static void ui_note_dirty(void) {
 }
 
 static void ui_full(void) {
+  d_host = d_bop = 1;
   d_page = d_map = d_edit = d_set = 1;
   d_chord = d_notes = d_pills = d_foot = d_head = 1;
+}
+
+/* the bottom band (y 166-220): Bop on the left; with Hingebox connected, the groove, tempo and track, and the
+ * pads as a 2x8 grid with the playhead */
+static int cnt_notes_held(void) {
+  int n = 0;
+  for (int i = 0; i < 128; i++) {
+    n += refs[i] ? 1 : 0;
+  }
+  return n;
+}
+
+static void draw_bop_corner(void) {
+  int mood = BOP_IDLE;
+  if (chord_txt[0] && notes_txt[0] && cnt_notes_held() >= 3) {
+    mood = BOP_HAPPY;
+  } else if (cnt_notes_held() > 0) {
+    mood = BOP_WOW;
+  }
+  int lift = (hb_active() && hb_step >= 0 && (hb_step % 4) < 2) ? 3 : 0;
+  bop_draw(8, 164, 46, mood, lift, C_BG, C_TXT, C_BOPBODY, C_ACC);
+}
+
+static void draw_host(void) {
+  rect(60, 164, SCREEN_W - 60, 56, C_BG);
+  if (!hb_active()) {
+    return;
+  }
+  if (hb_overlay_at && millis() - hb_overlay_at < 1500u) {
+    /* a knob just moved: its Hingebox name and a bar */
+    aa_text(66, 168, hb_text[2][0] ? hb_text[2] : "knob", C_TXT, AA_SMALL);
+    rect(66, 192, SCREEN_W - 82, 6, C_LINE);
+    rect(66, 192, hb_overlay_val * (SCREEN_W - 82) / 127, 6, C_ACC);
+    char v[14];
+    format_int(v, hb_overlay_val * 100 / 127);
+    int n = 0;
+    while (v[n]) {
+      n++;
+    }
+    v[n] = '%', v[n + 1] = 0;
+    aa_text_r(SCREEN_W - 16, 200, v, C_MUT, AA_SMALL);
+    return;
+  }
+  aa_text(66, 166, hb_text[0][0] ? hb_text[0] : "hingebox", C_TXT, AA_SMALL);
+  char line[24];
+  int i = 0;
+  if (hb_bpm) {
+    char t[12];
+    format_int(t, hb_bpm);
+    for (int k = 0; t[k]; k++) {
+      line[i++] = t[k];
+    }
+    const char* u = " bpm";
+    for (int k = 0; u[k]; k++) {
+      line[i++] = u[k];
+    }
+  }
+  line[i] = 0;
+  aa_text(66, 186, line, C_MUT, AA_SMALL);
+  aa_text(66, 204, hb_text[1], C_ACC, AA_SMALL);
+  /* the pads, as lit, with the playhead framed */
+  int gx = 152, gy = 170, cw = 9, ch = 18, g = 1;
+  for (int p = 0; p < 16; p++) {
+    int x = gx + (p % 8) * (cw + g), y = gy + (p / 8) * (ch + g);
+    uint16_t c = pad_colour(p);
+    rect(x, y, cw, ch, c ? c : C_CARD);
+  }
+  if (hb_step >= 0) {
+    int x = gx + (hb_step % 8) * (cw + g), y = gy + (hb_step / 8) * (ch + g);
+    frame(x - 1, y - 1, cw + 2, ch + 2, C_TXT);
+  }
 }
 
 static void draw_perform(void) {
@@ -841,7 +991,13 @@ static void draw_perform(void) {
     draw_main_cc();
     draw_main_meter();
   }
-  d_page = d_chord = d_notes = d_pills = d_foot = d_head = 0;
+  if (d_page || d_bop || d_chord || d_notes) {
+    draw_bop_corner();
+  }
+  if (d_page || d_host) {
+    draw_host();
+  }
+  d_page = d_chord = d_notes = d_pills = d_foot = d_head = d_host = d_bop = 0;
 }
 
 static void draw_mode_page(void) {
@@ -915,6 +1071,16 @@ static void draw_mode_page(void) {
 }
 
 static void redraw(void) {
+  if (splash_until) {
+    if (millis() < splash_until) {
+      if (d_chord || d_notes || d_pills || d_foot) {
+        build_note_text(); /* the chord is still worked out under the splash; it's drawn once it goes */
+      }
+      return;
+    }
+    splash_until = 0;
+    ui_full();
+  }
   if (page == PG_MAP) {
     if (d_map) {
       draw_map();
@@ -1079,7 +1245,9 @@ static void midi_in(void) {
           host_on = 1;
         }
       } else if (hi == 0xB0) {
-        if (d1 >= 20 && d1 < 36) {
+        if (d1 >= 107 && d1 <= 119) {
+          hb_cc(d1, d2);
+        } else if (d1 >= 20 && d1 < 36) {
           host_rgb[d1 - 20] = d2 ? hsv565((uint32_t)d2 * 2u, 190, 235) : 0;
           host_on = 1;
         } else if (d1 == 16) {
@@ -1424,6 +1592,17 @@ void setup(void) {
   build_note_text();
   last_vel = 0;
   ui_full();
+  /* the boot splash: Bop and the wordmark, for a moment */
+  clear(C_BG);
+  bop_draw(75, 40, 90, BOP_HAPPY, 0, C_BG, C_TXT, C_BOPBODY, C_ACC);
+  /* lowercase in the bitmap mono, like the app's wordmark (the anti-aliased faces have capitals only) */
+  int w = text_width("hingebox", FONT_SMALL) * 3;
+  int x = text_scale((SCREEN_W - w) / 2, 160, "hinge", C_TXT, FONT_SMALL, 3);
+  text_scale(x, 160, "box", C_ACC, FONT_SMALL, 3);
+  splash_until = millis() + 1400u;
+  if (!splash_until) {
+    splash_until = 1;
+  }
 }
 
 void loop(void) {
@@ -1894,6 +2073,18 @@ void loop(void) {
   if (cc_at && millis() - cc_at >= 1500u) {
     cc_at = 0;
     d_foot = 1;
+  }
+  if (hb_overlay_at && millis() - hb_overlay_at >= 1500u) {
+    hb_overlay_at = 0;
+    d_host = 1;
+  }
+  {
+    static int was_active;
+    int a = hb_active();
+    if (a != was_active) {
+      was_active = a;
+      d_host = d_bop = 1;
+    }
   }
   {
     static uint8_t toast_shown;

@@ -10,6 +10,16 @@ the firmware to konsumer and the FOMA platform), with these changes:
 - Pads send on channel 10 out of the box (notes 36-51), so they never collide with the keys (from 48, channel 1).
 - Named HINGEBOX; packages `hingebox-smk37[-elite|-mke]-<version>.fwsc`.
 
+- The screen is Hingebox's: OLED black, orange, a lowercase wordmark, and Bop (the app's robot) bottom-left,
+  reacting to what you play. With Hingebox connected it shows the groove, tempo, track and the pads as a 2x8 grid
+  with the playhead; a mapped knob shows its Hingebox name and value.
+- The build refuses any package that would write the bootloader head, Bluetooth pairing/calibration or key_mac.
+
+**Host protocol (channel 16 CCs; SysEx belongs to the updater on this platform):** 119 hello → we answer 119 = 1
+(protocol), 118 = capabilities (1 pad lights, 2 screen, 4 buttons), 117 = version (2 = 0.2). 113 playhead 0-15
+(127 stopped). 111/112 tempo high/low 7 bits. 110 slot (0 groove, 1 track, 2 knob label), 109 one ASCII
+character, 108 show it. 107 the knob's value (with slot 2) for 1.5 s. Pads: note-on 36-51, velocity = hue.
+
 Flashing is at your own risk: back up the unit's flash first (see below and genkigenki/fm1-to-smk37 docs/02).
 
 ---

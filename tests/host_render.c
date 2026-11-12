@@ -615,6 +615,62 @@ int main(void) {
     printf("long chord: %s (big %d, mid %d)\n", chord_txt, aa_width(chord_txt, AA_BIG), aa_width(chord_txt, AA_MID));
   }
 
+  /* Hingebox (the host) drives the screen and the pads (2026-11-12): hello answered, groove, tempo, track,
+   * playhead, pads; then a knob's label and value; and it all goes when the host goes quiet */
+  {
+    page_set(PG_MAIN);
+    now_ms += 2000;
+    int before = sent_count;
+    midi_push(0xBF, 119, 1);
+    tick();
+    if (sent_count - before < 3) {
+      printf("hello: %d replies, want 3\n", sent_count - before);
+      return 1;
+    }
+    const char* g = "sunday keys";
+    midi_push(0xBF, 110, 0);
+    for (int i = 0; g[i]; i++) midi_push(0xBF, 109, (uint8_t)g[i]);
+    midi_push(0xBF, 108, 0);
+    tick();
+    const char* t = "kick";
+    midi_push(0xBF, 110, 1);
+    for (int i = 0; t[i]; i++) midi_push(0xBF, 109, (uint8_t)t[i]);
+    midi_push(0xBF, 108, 0);
+    midi_push(0xBF, 111, 0);
+    midi_push(0xBF, 112, 96);
+    tick();
+    for (int p = 0; p < 16; p++) midi_push(0x9F, (uint8_t)(36 + p), (p % 4 == 0) ? 10 : 0);
+    midi_push(0xBF, 113, 4);
+    tick();
+    if (strcmp(hb_text[0], "sunday keys") || strcmp(hb_text[1], "kick") || hb_bpm != 96 || hb_step != 4) {
+      printf("host: groove \"%s\" track \"%s\" bpm %d step %d\n", hb_text[0], hb_text[1], hb_bpm, hb_step);
+      return 1;
+    }
+    press_key(base + 0);
+    press_key(base + 4);
+    press_key(base + 7);
+    tick();
+    ppm("build/host-hingebox.ppm");
+    release_key(base + 0);
+    release_key(base + 4);
+    release_key(base + 7);
+    tick();
+    const char* k = "reverb";
+    midi_push(0xBF, 110, 2);
+    for (int i = 0; k[i]; i++) midi_push(0xBF, 109, (uint8_t)k[i]);
+    midi_push(0xBF, 108, 0);
+    midi_push(0xBF, 107, 80);
+    tick();
+    ppm("build/host-knob.ppm");
+    now_ms += 5000;
+    tick();
+    tick();
+    if (hb_active()) {
+      printf("host: still active after 5 s of quiet\n");
+      return 1;
+    }
+  }
+
   printf("%s: ok, save called %d, sent %d, chord \"%s\", arp/banks/scale/chord ok\n",
          BOARD_SMK37 ? "smk37" : "fm1", saved_ok, sent_count, chord_txt);
   return 0;
