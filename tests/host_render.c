@@ -210,6 +210,11 @@ int wheel(int i) {
   return 512;
 }
 int pedal_raw(void) { return BOARD_SMK37 ? 0 : -1; }
+#if FOMA_USB_AUDIO
+static int32_t t_ain[64];
+static int t_ain_on;
+const int32_t* audio_in(void) { return t_ain_on ? t_ain : 0; }
+#endif
 static uint32_t ledkeys, ledbtns, ledbtns_dim;
 void led_button_dim_stub(int b, int on) {
   if (on)
@@ -322,6 +327,30 @@ static void release_btn(int b) {
 int main(void) {
   setup();
   tick();
+#if FOMA_USB_AUDIO
+  { /* the keyboard as a sound card: silence until the host plays, then exactly what it plays */
+    int32_t o[64] = {0};
+    audio(o, 32);
+    for (int i = 0; i < 64; i++) {
+      if (o[i]) {
+        printf("audio: not silent without the host\n");
+        return 1;
+      }
+    }
+    for (int i = 0; i < 64; i++) {
+      t_ain[i] = (i * 997) % 65535 - 32767;
+    }
+    t_ain_on = 1;
+    audio(o, 32);
+    t_ain_on = 0;
+    for (int i = 0; i < 64; i++) {
+      if (o[i] != t_ain[i]) {
+        printf("audio: sample %d is %d, want %d\n", i, (int)o[i], (int)t_ain[i]);
+        return 1;
+      }
+    }
+  }
+#endif
   ppm("build/host-perform.ppm");
 
   /* C4 E4 G4 B4: a maj7. The SMK's key 12 is C4 (key 0 = C3); the FM-1's key 12 is C4 too (key 0 = F3) */

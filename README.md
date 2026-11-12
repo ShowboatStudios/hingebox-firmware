@@ -15,6 +15,12 @@ the firmware to konsumer and the FOMA platform), with these changes:
   with the playhead; a mapped knob shows its Hingebox name and value.
 - The build refuses any package that would write the bootloader head, Bluetooth pairing/calibration or key_mac.
 
+**USB audio on the SMK-37 (2026-11-12, Elite, not working yet):** with `usb_audio` on, `audio()` passes the host's
+audio straight to the output (host-tested). On the keyboard, the app build doesn't finish enumerating on macOS (the
+device shows up, but no MIDI and no sound card), while the same build's OCT- rescue, where the audio engine never
+starts, enumerates as MIDI plus a 2-channel 44.1 kHz output. So the descriptors are fine and something at run time
+with the audio ISR running stalls enumeration. Keep `usb_audio` off for releases until that's found.
+
 **Host protocol (channel 16 CCs; SysEx belongs to the updater on this platform):** 119 hello → we answer 119 = 1
 (protocol), 118 = capabilities (1 pad lights, 2 screen, 4 buttons), 117 = version (2 = 0.2). 113 playhead 0-15
 (127 stopped). 111/112 tempo high/low 7 bits. 110 slot (0 groove, 1 track, 2 knob label), 109 one ASCII

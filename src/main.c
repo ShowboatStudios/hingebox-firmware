@@ -2144,6 +2144,17 @@ void loop(void) {
   redraw();
 }
 
-void audio(int32_t* out, uint32_t frames) { /* a controller: silence */
+/* a controller that is also a sound card (usb_audio, 0.3): whatever the phone or computer plays over USB comes
+ * out of the keyboard's own output. Without usb_audio: silence. */
+void audio(int32_t* out, uint32_t frames) {
+#if FOMA_USB_AUDIO
+  const int32_t* in = audio_in();
+  if (in) {
+    for (uint32_t i = 0; i < 2u * frames; i++) {
+      out[i] = in[i];
+    }
+  }
+#else
   (void)out, (void)frames;
+#endif
 }
