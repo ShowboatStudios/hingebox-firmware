@@ -299,6 +299,12 @@ static void ppm(const char* path) {
   }
   fclose(f);
 }
+/* SMK-37 shots are build/host-NAME.ppm; the FM-1's build/fm1-host-NAME.ppm (it used to overwrite them) */
+static void shot(const char* name) {
+  char path[96];
+  snprintf(path, sizeof path, "build/%shost-%s.ppm", BOARD_SMK37 ? "" : "fm1-", name);
+  ppm(path);
+}
 static void tick(void) {
   now_ms += 10;
   loop();
@@ -327,6 +333,9 @@ static void release_btn(int b) {
 int main(void) {
   setup();
   tick();
+  shot("splash");
+  now_ms += 1500; /* past the boot splash: the shots below are the pages, not the splash again */
+  tick();
 #if FOMA_USB_AUDIO
   { /* the keyboard as a sound card: silence until the host plays, then exactly what it plays */
     int32_t o[64] = {0};
@@ -351,7 +360,7 @@ int main(void) {
     }
   }
 #endif
-  ppm("build/host-perform.ppm");
+  shot("perform");
 
   /* C4 E4 G4 B4: a maj7. The SMK's key 12 is C4 (key 0 = C3); the FM-1's key 12 is C4 too (key 0 = F3) */
   int base = BOARD_SMK37 ? 12 : 7; /* key 0 = C3 / F3; both reach C4 here */
@@ -360,7 +369,7 @@ int main(void) {
   press_key(base + 7);             /* G */
   press_key(base + 11);            /* B */
   tick();
-  ppm("build/host-chord.ppm");
+  shot("chord");
   if (strcmp(chord_txt, "CMAJ7")) {
     printf("chord: %s, want CMAJ7\n", chord_txt);
     return 1;
@@ -417,7 +426,7 @@ int main(void) {
   tick();
   release_btn(BTN_GLO);
   tick();
-  ppm("build/host-map.ppm");
+  shot("map");
   if (ink() < 2000) {
     printf("the map screen is nearly blank (%d)\n", ink());
     return 1;
@@ -426,7 +435,7 @@ int main(void) {
   tick();
   release_btn(BTN_SEL);
   tick();
-  ppm("build/host-edit.ppm");
+  shot("edit");
   if (ink() < 2000) {
     printf("the edit screen is nearly blank (%d)\n", ink());
     return 1;
@@ -443,7 +452,7 @@ int main(void) {
   press_key(base + 6); /* F# */
   press_key(base + 9); /* A */
   tick();
-  ppm("build/host-dmaj.ppm");
+  shot("dmaj");
 
   /* scale lock: C# snaps up to D (C major) */
   cfg.scale_on = 1;
@@ -553,24 +562,24 @@ int main(void) {
       printf("knob bank B did not send CC31\n");
       return 1;
     }
-    ppm("build/host-cc.ppm");
+    shot("cc");
   }
 #endif
 
   /* the mode pages render */
   page_set(PG_ARP);
   tick();
-  ppm("build/host-arp.ppm");
+  shot("arp");
   if (ink() < 2000) {
     printf("the arp page is nearly blank\n");
     return 1;
   }
   page_set(PG_CHORD);
   tick();
-  ppm("build/host-chord-mode.ppm");
+  shot("chord-mode");
   page_set(PG_SCALE);
   tick();
-  ppm("build/host-scale.ppm");
+  shot("scale");
   page_set(PG_MAIN);
   tick();
 
@@ -625,7 +634,7 @@ int main(void) {
   }
   page_set(PG_SPLIT);
   tick();
-  ppm("build/host-split.ppm");
+  shot("split");
   if (ink() < 2000) {
     printf("the split page is nearly blank\n");
     return 1;
@@ -640,7 +649,7 @@ int main(void) {
     page_set(PG_MAIN);
     tick();
     draw_main_chord();
-    ppm("build/host-chord-long.ppm");
+    shot("chord-long");
     printf("long chord: %s (big %d, mid %d)\n", chord_txt, aa_width(chord_txt, AA_BIG), aa_width(chord_txt, AA_MID));
   }
 
@@ -679,7 +688,7 @@ int main(void) {
     press_key(base + 4);
     press_key(base + 7);
     tick();
-    ppm("build/host-hingebox.ppm");
+    shot("hingebox");
     release_key(base + 0);
     release_key(base + 4);
     release_key(base + 7);
@@ -690,7 +699,7 @@ int main(void) {
     midi_push(0xBF, 108, 0);
     midi_push(0xBF, 107, 80);
     tick();
-    ppm("build/host-knob.ppm");
+    shot("knob");
     now_ms += 5000;
     tick();
     tick();
