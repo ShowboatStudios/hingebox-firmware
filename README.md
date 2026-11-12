@@ -1,32 +1,88 @@
-# Hingebox firmware (a fork of DUMBMIDI)
+# Hingebox firmware
 
-The SMK-37 (Pro, Elite, MKE-P37) and FM-1 firmware that [Hingebox](https://github.com/ShowboatStudios/hingebox)
-offers to install: a fork of [konsumer/dumbmidi](https://github.com/konsumer/dumbmidi) (GPL-3.0, all credit for
-the firmware to konsumer and the FOMA platform), with these changes:
+Firmware for the **M-VAVE SMK-37** keyboard that turns it into a controller for
+[Hingebox](https://github.com/ShowboatStudios/hingebox), the iOS groovebox: the pads light with your beat, the
+screen follows the groove with Bop (Hingebox's robot), and the transport buttons light while it plays and records.
+It's a fork of [konsumer/dumbmidi](https://github.com/konsumer/dumbmidi) (GPL-3.0), and all of DUMBMIDI's
+features stay (chord display, on-screen mapping, arp, chord memory, scale, splits, USB + Bluetooth MIDI out); the
+original README follows below. All credit for the firmware and its platform goes to konsumer and the projects in
+[LICENSING.md](LICENSING.md).
 
-- Pad colours a host streams on channel 16 live in RAM only: Hingebox lights the pads with its step grid and a
-  running playhead, which in DUMBMIDI rewrote the saved settings (flash) every time the stream paused. CC 17 = 0
-  hands the pads back to the saved colours.
-- Pads send on channel 10 out of the box (notes 36-51), so they never collide with the keys (from 48, channel 1).
-- Named HINGEBOX; packages `hingebox-smk37[-elite|-mke]-<version>.fwsc`.
+## What Hingebox changes
 
-- The screen is Hingebox's: OLED black, orange, a lowercase wordmark, and Bop (the app's robot) bottom-left,
-  reacting to what you play. With Hingebox connected it shows the groove, tempo, track and the pads as a 2x8 grid
-  with the playhead; a mapped knob shows its Hingebox name and value.
-- The build refuses any package that would write the bootloader head, Bluetooth pairing/calibration or key_mac.
+- **Pad colours from a host live in RAM.** Hingebox streams its step grid and a running playhead; DUMBMIDI rewrote
+  the saved settings (flash) each time such a stream paused. CC 17 = 0 hands the pads back to the saved colours.
+- **Pads send on channel 10** out of the box (notes 36-51), so they never collide with the keys (channel 1, from 48).
+- **The screen is Hingebox's:** OLED black, orange, lowercase mono, Bop bottom-left reacting to what you play. With
+  Hingebox connected it shows the groove, tempo and track, the pads as a 2x8 grid with the playhead, and a mapped
+  knob's Hingebox name and value.
+- **Button lights:** SEQ PLAY lights while the groove plays, SEQ REC while recording.
+- **The host protocol:** plain channel-16 CCs any app can use, no SysEx. See [docs/HOST-PROTOCOL.md](docs/HOST-PROTOCOL.md).
+- Named HINGEBOX; packages `hingebox-smk37[-elite|-mke]-<version>.fwsc` (and `hingebox-<version>.fwsc` for the FM-1).
+
+## Which keyboards
+
+| Keyboard | Package | Status |
+| --- | --- | --- |
+| SMK-37 **Elite** | `hingebox-smk37-elite-<v>.fwsc` | **Tested** (0.1.0 and 0.2.0, 2026-11-12): installed from the Hingebox app and back to stock |
+| SMK-37 **Pro** | `hingebox-smk37-<v>.fwsc` | Built from the same source, untested; offered by the app |
+| MKE-P37 | `hingebox-smk37-mke-<v>.fwsc` | Built, untested; not offered by the app |
+| FM-1 | `hingebox-<v>.fwsc` | Built, untested; the app doesn't install it |
+
+The model name is part of the package: a keyboard's updater only takes its own model's package.
+
+## Install
+
+**From the Hingebox app (SMK-37 Pro and Elite):** plug the keyboard in over USB, stop the groove, then Settings ›
+your keyboard › keyboard update › tell me more. The app downloads the latest release from this repo, checks it
+against the SHA-256 GitHub publishes, reads the whole package before sending a byte, pauses its own MIDI meanwhile,
+and checks the keyboard comes back running it. USB only, never over Bluetooth. About two minutes.
+
+**By package:** download the `.fwsc` for your model from
+[Releases](https://github.com/ShowboatStudios/hingebox-firmware/releases) and install it with an updater that takes
+a `.fwsc` file for that model (the `fm1` script points to mutant.cloud and M-VAVE's stock updater).
+
+## Safety
+
+- **Back up first.** A full flash backup (the [fm1-to-smk37](https://github.com/genkigenki/fm1-to-smk37) kit's
+  `jl-uboot-tool` procedure, its docs/02) is the only real safety net. Unofficial firmware is flashed at your own risk.
+- **Calibration is never written.** The factory key and pad calibration, the Bluetooth pairing, the bootloader head
+  and `key_mac` are outside every package: `tools/fm1pkg_make.py` refuses to build a package that would reach them,
+  and the firmware's flash allow-list and RAM flash driver refuse to write them.
+- **Rescue:** hold **OCT-** while switching on. The keyboard starts in its USB rescue (no sound, only the updater),
+  ready for a package. Two crashes in a row at boot land there by themselves.
+- If an install from the app doesn't find the keyboard in update mode, nothing was written: switch it off and on and
+  try again (seen once on the Elite; the second try worked).
+
+## Going back to stock (V016)
+
+From the app: the same page, **back to m-vave's software**. It installs M-VAVE's V016 package for your model (SMK-37
+Pro or Elite), downloaded from M-VAVE and checked against a pinned SHA-256. Verified on the SMK-37 Elite on
+2026-11-12. By hand: install the matching stock package from the [Firmware Hub](https://thefirmwarehub.com/smk37/)
+with M-VAVE's updater.
+
+## Build
+
+```sh
+./fm1 build    # Docker only: the FM-1, SMK-37 Pro, Elite and MKE-P37 packages in build/
+tests/run.sh   # host tests: chord and mapping units, both boards' screens rendered to build/host-*.ppm
+```
+
+The name and version come from `firmware.json`. Releases are tagged `vX.Y.Z` with the four packages attached.
+
+## Work in progress
 
 **USB audio on the SMK-37 (2026-11-12, Elite, not working yet):** with `usb_audio` on, `audio()` passes the host's
 audio straight to the output (host-tested). On the keyboard, the app build doesn't finish enumerating on macOS (the
 device shows up, but no MIDI and no sound card), while the same build's OCT- rescue, where the audio engine never
 starts, enumerates as MIDI plus a 2-channel 44.1 kHz output. So the descriptors are fine and something at run time
-with the audio ISR running stalls enumeration. Keep `usb_audio` off for releases until that's found.
+with the audio ISR running stalls enumeration. `usb_audio` stays off for releases until that's found.
 
-**Host protocol (channel 16 CCs; SysEx belongs to the updater on this platform):** 119 hello → we answer 119 = 1
-(protocol), 118 = capabilities (1 pad lights, 2 screen, 4 buttons), 117 = version (2 = 0.2). 113 playhead 0-15
-(127 stopped). 111/112 tempo high/low 7 bits. 110 slot (0 groove, 1 track, 2 knob label), 109 one ASCII
-character, 108 show it. 107 the knob's value (with slot 2) for 1.5 s. Pads: note-on 36-51, velocity = hue.
+## Licence and credits
 
-Flashing is at your own risk: back up the unit's flash first (see below and genkigenki/fm1-to-smk37 docs/02).
+GPL-3.0-only, like DUMBMIDI, Felucca, SLOOP and Dinghy: whoever gets a firmware built from this gets its source
+too. Every author and third-party part is listed in [LICENSING.md](LICENSING.md). "M-VAVE", "SMK-37" and "FM-1"
+belong to their owners; this project is not made or endorsed by M-VAVE.
 
 ---
 
