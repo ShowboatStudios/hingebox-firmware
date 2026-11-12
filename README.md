@@ -67,7 +67,7 @@ is the only real safety net. Going back: install the matching stock package from
 
 ## Play
 
-The main page is deliberately sparse: the chord the held notes make (`CMAJ7`, `C#MIN7/F`, ...) in large
+The main page is deliberately sparse: the chord the held notes make (`Cmaj7`, `C#m7/F`, ..., spelt as the app spells them) in large
 anti-aliased Inter Tight, the note names beneath it in small sans type, the octave and the modes that are on at the
 top, and the last note's velocity as one thin line at the bottom. A knob or fader move puts its `CCnn value` at
 the right for a moment. There is no logo and no page title; the menus are elsewhere.

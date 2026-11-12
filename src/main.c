@@ -24,7 +24,6 @@
 #define C_MUT RGB(125, 125, 120)
 #define C_BLUE RGB(47, 107, 255) /* Hingebox blue: the tempo, as on the deck */
 #define C_ACC RGB(255, 92, 31) /* Hingebox orange */
-#define C_BOPBODY RGB(40, 40, 42)
 #define C_SEL RGB(64, 26, 10)
 
 #if !BOARD_SMK37
@@ -483,6 +482,7 @@ static void mono_c(int y, const char* s, uint16_t c) {
 }
 
 static uint16_t deck_colour(uint8_t i);
+static uint8_t knob_colour_of(const char* name);
 static int hb_active(void) { return hb_seen && millis() - hb_seen < 4000u; }
 
 static void hb_cc(uint8_t cc, uint8_t v) {
@@ -530,6 +530,9 @@ static void hb_cc(uint8_t cc, uint8_t v) {
       for (int i = 0; i < 17; i++) {
         hb_text[hb_slot][i] = hb_buf[i];
       }
+      if (hb_slot == 2) {
+        hb_knob_col = 255; /* a new knob: its colour comes next (CC 106) or from its name */
+      }
       d_host = 1;
       break;
     case 107: /* the knob in slot 2: its name, value and bar, in its deck colour */
@@ -542,12 +545,15 @@ static void hb_cc(uint8_t cc, uint8_t v) {
       ov_sub[0] = 0;
       ov_val = v;
       ov_pct = 1;
-      ov_col = hb_knob_col < 8 ? deck_colour(hb_knob_col) : C_ACC;
+      if (hb_knob_col >= 8) { /* no CC 106 for this knob: its deck colour by name, else orange */
+        hb_knob_col = knob_colour_of(ov_name);
+      }
+      ov_col = deck_colour(hb_knob_col);
       ov_at = millis() ? millis() : 1;
       d_ov = 1;
       break;
     case 106:
-      hb_knob_col = v < 8 ? v : 255;
+      hb_knob_col = v < 8 ? v : 0; /* 127: the default, orange (the kick's) */
       break;
     case 105:
       hb_moment = v < 4 ? v : 0;
@@ -689,6 +695,27 @@ static uint16_t hue_colour(uint8_t v) {
   return hsv565((uint32_t)v * 2u, 190, 235);
 }
 static uint16_t deck_colour(uint8_t i) { return i < 8 ? DECK[i] : C_ACC; }
+
+/* a deck knob's colour by its name, for a host that names a knob without CC 106 (Hingebox Stage/ControlMap.swift
+ * `accent`, in the track colours' numbering: blue 1, green 4, orange 0, white 6, lilac 5, pink 2) */
+static uint8_t knob_colour_of(const char* name) {
+  static const struct {
+    const char* name;
+    uint8_t col;
+  } K[] = {{"tempo", 1}, {"drive", 1},  {"loops", 1},  {"swing", 4},    {"delay", 4},   {"wet", 4},
+           {"drums", 0}, {"volume", 0}, {"synth", 0},  {"beat", 0},     {"pump", 6},    {"crush", 6},
+           {"reverb", 6}, {"bass", 6},  {"pad", 5},    {"hinge fx", 5}, {"not set", 2}};
+  for (unsigned i = 0; i < sizeof K / sizeof K[0]; i++) {
+    int k = 0;
+    while (K[i].name[k] && (name[k] | 32) == K[i].name[k]) {
+      k++;
+    }
+    if (!K[i].name[k] && !name[k]) {
+      return K[i].col;
+    }
+  }
+  return 255;
+}
 
 static int str_len(const char* s) {
   int n = 0;
@@ -892,29 +919,53 @@ static void draw_main_status(void) {
   if (bt_ready) {
     x = mono_r(x, 4, "ble", C_TXT) - 8;
   }
-  static const char* const FULL[4] = {"arp", "chord", "scale", "split"};
-  static const char* const ONE[4] = {"a", "c", "s", "p"};
+  /* the modes that are on, as words (PASS3 item 8: no "a s p"); when they don't all fit, "oct 0" goes, then the
+   * last words become "+n" (the band beside Bop lists them all) */
+  static const char* const WORD[4] = {"arp", "chord", "scale", "split"};
   int on[4] = {cfg.arp_on, cfg.chord_on, cfg.scale_on, cfg.split_on};
+  const char* words[4];
+  int nw = 0, ww = 0;
+  for (int i = 0; i < 4; i++) {
+    if (on[i]) {
+      words[nw++] = WORD[i];
+      ww += text_width(WORD[i], FONT_SMALL) + (nw > 1 ? 8 : 0);
+    }
+  }
   char ov[8];
   int oct = cfg.transpose / 12, o = 0;
   if (oct > 0) {
     ov[o++] = '+';
   }
   format_int(ov + o, oct);
-  int need = 24 + 4 + text_width(ov, FONT_SMALL); /* "oct" and its value */
-  for (int i = 0; i < 4; i++) {
-    if (on[i]) {
-      need += text_width(FULL[i], FONT_SMALL) + 8;
+  int room = x - (wx + 8);
+  int oct_full = 24 + 4 + text_width(ov, FONT_SMALL), oct_short = oct ? text_width(ov, FONT_SMALL) : 0;
+  int full = oct_full + (nw ? 8 : 0) + ww <= room;
+  int show = nw;
+  char more[4] = "";
+  if (!full && oct_short + (nw && oct_short ? 8 : 0) + ww > room) {
+    /* keep the first words that fit with "+n" after them */
+    int avail = room - oct_short - (oct_short ? 8 : 0) - (8 + 16), used = 0;
+    show = 0;
+    while (show < nw && used + (show ? 8 : 0) + text_width(words[show], FONT_SMALL) <= avail) {
+      used += (show ? 8 : 0) + text_width(words[show], FONT_SMALL);
+      show++;
     }
+    more[0] = '+';
+    more[1] = (char)('0' + (nw - show));
+    more[2] = 0;
   }
-  int full = x - need >= wx + 8;
-  for (int i = 3; i >= 0; i--) {
-    if (on[i]) {
-      x = mono_r(x, 4, full ? FULL[i] : ONE[i], C_ACC) - 8;
-    }
+  if (more[0]) {
+    x = mono_r(x, 4, more, C_ACC) - 8;
   }
-  x = mono_r(x, 4, ov, oct ? C_TXT : C_MUT) - 4;
-  mono_r(x, 4, "oct", C_MUT);
+  for (int i = show - 1; i >= 0; i--) {
+    x = mono_r(x, 4, words[i], C_ACC) - 8;
+  }
+  if (full) {
+    x = mono_r(x, 4, ov, oct ? C_TXT : C_MUT) - 4;
+    mono_r(x, 4, "oct", C_MUT);
+  } else if (oct) {
+    mono_r(x, 4, ov, C_TXT);
+  }
   hairline(BAR_H - 1);
 }
 
@@ -1283,7 +1334,8 @@ static uint16_t bop_state(void) {
 static void draw_bop_corner(uint16_t st) {
   int mood = st & 3, lift = st >> 2 & 7, look = (st >> 5 & 7) - 2, blink = st >> 8 & 1;
   rect(0, BAND_Y, GRID_X - 6, 68, C_BG);
-  bop_draw_ex(BOP_X, BOP_Y, BOP_S, mood, lift, look, blink, C_BG, C_TXT, C_BOPBODY, C_ACC);
+  /* the screen's black inside a white outline (PASS3 item 6) */
+  bop_draw_ex(BOP_X, BOP_Y, BOP_S, mood, lift, look, blink, C_BG, C_TXT, C_BG, C_ACC);
   if (mood == BOP_SLEEPY) {
     mono(BOP_X + 38, BAND_Y, "z", C_MUT);
     mono(BOP_X + 46, BAND_Y + 4, "z", C_LINE);
@@ -1294,23 +1346,27 @@ static void draw_bop_corner(uint16_t st) {
 /* without Hingebox, beside Bop: the modes that are on, or Bop's line */
 static const char* chord_mood_line(void) {
   const char* c = chord_txt;
-  for (int i = 0; c[i]; i++) {
-    if (c[i] == 'D' && c[i + 1] == 'I') {
+  if (*c) {
+    c++; /* the root, and its sharp or flat */
+  }
+  if (*c == '#' || *c == 'b') {
+    c++;
+  }
+  for (int i = 0; c[i] && c[i] != '/'; i++) {
+    if (c[i] == 'd' && c[i + 1] == 'i') {
       return "spooky!";
     }
-    if (c[i] == 'A' && c[i + 1] == 'U') {
+    if (c[i] == 'a' && c[i + 1] == 'u') {
       return "dreamy...";
     }
-    if (c[i] == 'S' && c[i + 1] == 'U') {
+    if (c[i] == 's' && c[i + 1] == 'u') {
       return "floaty!";
     }
   }
-  for (int i = 0; c[i]; i++) {
-    if (c[i] == 'M' && c[i + 1] == 'I') {
-      return "moody...";
-    }
+  if (c[0] == 'm' && c[1] != 'a') {
+    return "moody...";
   }
-  for (int i = 0; c[i]; i++) {
+  for (int i = 0; c[i] && c[i] != '/'; i++) {
     if (c[i] >= '6' && c[i] <= '9') {
       return "jazzy!";
     }
@@ -2178,7 +2234,7 @@ void setup(void) {
   ui_full();
   /* the boot splash: Bop and the wordmark, for a moment */
   clear(C_BG);
-  bop_draw(75, 40, 90, BOP_HAPPY, 0, C_BG, C_TXT, C_BOPBODY, C_ACC);
+  bop_draw(75, 40, 90, BOP_HAPPY, 0, C_BG, C_TXT, C_BG, C_ACC); /* the screen's black in a white outline */
   /* lowercase in the bitmap mono, like the app's wordmark (the anti-aliased faces have capitals only) */
   int w = text_width("hingebox", FONT_SMALL) * 3;
   int x = text_scale((SCREEN_W - w) / 2, 160, "hinge", C_TXT, FONT_SMALL, 3);

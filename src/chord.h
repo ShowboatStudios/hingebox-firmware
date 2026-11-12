@@ -1,9 +1,11 @@
-/* Chord naming: a set of sounding pitch classes -> "CMAJ7", "C#MIN7/F", ... (pure C, no platform: the host
- * test includes it too). The suffixes are the big font's (capitals, digits, signs only). */
+/* Chord naming: a set of sounding pitch classes -> "Cmaj7", "C#m7/F", ... (pure C, no platform: the host
+ * test includes it too). Spelt as Hingebox spells the chord the keys make (Stage/LiveKeys.swift ChordName): its
+ * note names and suffixes, with b and # for the app's flat and sharp signs (the big font has no music signs; it
+ * carries the suffixes' lowercase letters as extras, tools/aa_extend.py). */
 #pragma once
 #include <stdint.h>
 
-static const char* const NOTE_NAME[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+static const char* const NOTE_NAME[12] = {"C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"};
 
 /* an exact pitch-class set (rooted at 0) -> suffix; first match wins */
 typedef struct {
@@ -15,25 +17,25 @@ typedef struct {
 static const chord_tpl_t CHORDS[] = {
     {PC(0) | PC(7), "5"},                          /* power */
     {PC(0) | PC(4) | PC(7), ""},                   /* major */
-    {PC(0) | PC(3) | PC(7), "MIN"},                /* minor */
-    {PC(0) | PC(3) | PC(6), "DIM"},                /* diminished */
-    {PC(0) | PC(4) | PC(8), "AUG"},                /* augmented */
-    {PC(0) | PC(2) | PC(7), "SUS2"},               /* sus2 */
-    {PC(0) | PC(5) | PC(7), "SUS4"},               /* sus4 */
+    {PC(0) | PC(3) | PC(7), "m"},                  /* minor */
+    {PC(0) | PC(3) | PC(6), "dim"},                /* diminished */
+    {PC(0) | PC(4) | PC(8), "aug"},                /* augmented */
+    {PC(0) | PC(2) | PC(7), "sus2"},               /* sus2 */
+    {PC(0) | PC(5) | PC(7), "sus4"},               /* sus4 */
     {PC(0) | PC(4) | PC(7) | PC(9), "6"},          /* major 6 */
-    {PC(0) | PC(3) | PC(7) | PC(9), "MIN6"},       /* minor 6 */
-    {PC(0) | PC(4) | PC(7) | PC(11), "MAJ7"},      /* major 7 */
+    {PC(0) | PC(3) | PC(7) | PC(9), "m6"},         /* minor 6 */
+    {PC(0) | PC(4) | PC(7) | PC(11), "maj7"},      /* major 7 */
     {PC(0) | PC(4) | PC(7) | PC(10), "7"},         /* dominant 7 */
-    {PC(0) | PC(3) | PC(7) | PC(10), "MIN7"},      /* minor 7 */
-    {PC(0) | PC(3) | PC(6) | PC(10), "MIN7B5"},    /* half-diminished */
-    {PC(0) | PC(3) | PC(6) | PC(9), "DIM7"},       /* diminished 7 */
-    {PC(0) | PC(2) | PC(4) | PC(7), "ADD9"},       /* add9 */
-    {PC(0) | PC(2) | PC(3) | PC(7), "MINADD9"},    /* minor add9 */
+    {PC(0) | PC(3) | PC(7) | PC(10), "m7"},        /* minor 7 */
+    {PC(0) | PC(3) | PC(6) | PC(10), "m7b5"},      /* half-diminished */
+    {PC(0) | PC(3) | PC(6) | PC(9), "dim7"},       /* diminished 7 */
+    {PC(0) | PC(2) | PC(4) | PC(7), "add9"},       /* add9 */
+    {PC(0) | PC(2) | PC(3) | PC(7), "madd9"},      /* minor add9 */
     {PC(0) | PC(2) | PC(4) | PC(7) | PC(10), "9"}, /* dominant 9 */
-    {PC(0) | PC(2) | PC(4) | PC(7) | PC(11), "MAJ9"},
-    {PC(0) | PC(2) | PC(3) | PC(7) | PC(10), "MIN9"},
-    {PC(0) | PC(5) | PC(7) | PC(10), "7SUS4"},
-    {PC(0) | PC(4) | PC(8) | PC(11), "MAJ7#5"},
+    {PC(0) | PC(2) | PC(4) | PC(7) | PC(11), "maj9"},
+    {PC(0) | PC(2) | PC(3) | PC(7) | PC(10), "m9"},
+    {PC(0) | PC(5) | PC(7) | PC(10), "7sus4"},
+    {PC(0) | PC(4) | PC(8) | PC(11), "maj7#5"},
     {PC(0) | PC(2) | PC(4) | PC(7) | PC(9), "6/9"},
 };
 
@@ -50,7 +52,7 @@ static inline int chord_count(uint16_t pcs) {
 }
 
 /* pcs: the pitch classes held (bit n = n); bass: the lowest note's pitch class, or -1.
- * out gets "CMAJ7", "C#MIN7/F" or a single "C4"-style note name; returns the length. No
+ * out gets "Cmaj7", "C#m7/F" or a single "C4"-style note name; returns the length. No
  * match: "?" (the notes are still shown separately). */
 static inline int chord_name(uint16_t pcs, int bass, char* out, int cap) {
   const chord_tpl_t* hit = 0;

@@ -370,8 +370,8 @@ int main(void) {
   press_key(base + 11);            /* B */
   tick();
   shot("chord");
-  if (strcmp(chord_txt, "CMAJ7")) {
-    printf("chord: %s, want CMAJ7\n", chord_txt);
+  if (strcmp(chord_txt, "Cmaj7")) {
+    printf("chord: %s, want Cmaj7\n", chord_txt);
     return 1;
   }
   if (notes_txt[0] != 'C') {
@@ -705,6 +705,10 @@ int main(void) {
       printf("overlay: \"%s\"\n", ov_name);
       return 1;
     }
+    if (ov_col != DECK[6]) { /* no CC 106 sent: the deck's reverb knob is white (PASS3 item 8) */
+      printf("overlay colour: reverb is not the deck's white\n");
+      return 1;
+    }
     {
       int caps = -1;
       for (int i = 0; i < sent_count && i < 64; i++)
@@ -718,6 +722,19 @@ int main(void) {
     if (hue_colour(10) != DECK[0] || hue_colour(80) != DECK[1]) {
       printf("hue_colour: the deck's kick / snare hues are not the deck's colours\n");
       return 1;
+    }
+    {
+      const char* k3 = "drive";
+      midi_push(0xBF, 110, 2);
+      for (int i = 0; k3[i]; i++) midi_push(0xBF, 109, (uint8_t)k3[i]);
+      midi_push(0xBF, 108, 0);
+      midi_push(0xBF, 107, 100);
+      tick();
+      shot("knob-drive");
+      if (ov_col != DECK[1]) {
+        printf("overlay colour: drive is not the deck's blue\n");
+        return 1;
+      }
     }
     const char* k2 = "swing";
     midi_push(0xBF, 110, 2);
@@ -789,6 +806,11 @@ int main(void) {
     press_key(base + 5);
     tick();
     shot("modes");
+    cfg.chord_on = 1; /* all four on: the words that fit, then "+n" */
+    ui_full();
+    tick();
+    shot("modes-all");
+    cfg.chord_on = 0;
     release_key(base + 2);
     release_key(base + 5);
     cfg.arp_on = cfg.scale_on = cfg.split_on = 0;

@@ -1,6 +1,7 @@
 /* Bop, Hingebox's robot (the cover show's pictogram), on the keyboard's 240x240 screen (Hingebox fork, 2026-11-12).
- * Built from rects, rings and lines so it costs a few rows to redraw: a rounded body with ring eyes and pupils,
- * pill feet, an antenna whose tip is the one spot of colour. The same shape as the app's Bop (UI/Bop.swift).
+ * Built from rects, rings and lines so it costs a few rows to redraw. One Bop everywhere (PASS3 item 6, the app's
+ * UI/Bop.swift): a 4:3 rounded head, ring eyes with pupils, pill feet 2.5 times as wide as tall and fully round,
+ * the antenna ball in the current accent. On the black screen: the screen's black inside a white outline.
  * Moods: idle, wow (surprised: a fill or a drop), happy (a chord), sleepy (nothing played for a minute).
  * lift: px up (the beat bob); look: the pupils' x offset in px (toward the notes); blink: eyes shut a moment. */
 #ifndef BOP_H
@@ -13,7 +14,7 @@ enum { BOP_IDLE, BOP_WOW, BOP_HAPPY, BOP_SLEEPY };
 static void bop_disc(int cx, int cy, int r, uint16_t c) {
   for (int dy = -r; dy <= r; dy++) {
     int dx = 0;
-    while ((dx + 1) * (dx + 1) + dy * dy <= r * r) {
+    while ((dx + 1) * (dx + 1) + dy * dy <= r * r + r) { /* r + 1/2: round, without a nub at each end */
       dx++;
     }
     rect(cx - dx, cy + dy, 2 * dx + 1, 1, c);
@@ -48,37 +49,38 @@ static void bop_round(int x, int y, int wd, int ht, int r, uint16_t f, uint16_t 
   }
 }
 
-/* a pill: a rect with fully round ends, outlined in c and filled with f */
-static void bop_pill(int x, int y, int wd, int ht, uint16_t f, uint16_t c) {
-  int r = (ht - 1) / 2;
-  bop_round(x, y, wd, ht, r, f, c, ht >= 6 ? 1 : ht);
+/* a pill: a rect with fully round ends (an odd height, so the ends are whole discs), a w px outline in c around f */
+static void bop_pill(int x, int y, int wd, int ht, uint16_t f, uint16_t c, int w) {
+  bop_round(x, y, wd, ht, (ht - 1) / 2, f, c, w);
 }
 
 /* Bop at (x, y) = top-left of a box s wide and about 1.2 s tall, on background bg. lift: px up (the beat bob).
- * ink: the lines; body: the fill; tip: the antenna's spot of colour. */
+ * ink: the outline and face; body: the fill (the screen's black on the black screen); tip: the antenna ball. */
 static void bop_draw_ex(int x, int y, int s, int mood, int lift, int look, int blink, uint16_t bg, uint16_t ink,
                         uint16_t body, uint16_t tip) {
   int w = s / 22 + 1; /* line width */
   rect(x, y, s, s * 6 / 5 + 4, bg);
-  int bx = x + s / 12, by = y + s / 4 - lift, bw = s - s / 6, bh = s * 7 / 10;
-  /* antenna: a stem leaning right, and the tip (bigger when surprised) */
+  /* the head: 4:3, low enough that the ball stays inside the box at the top of a bob */
+  int bw = s - s / 6, bh = bw * 3 / 4, bx = x + (s - bw) / 2, by = y + s / 4 + 4 - lift;
+  /* antenna: a stem leaning right, and the ball (bigger when surprised) */
   int sx = x + s / 2, sy = by;
   for (int i = 0; i < s / 5; i++) {
     rect(sx + i / 3, sy - i, w, 1, ink);
   }
-  int tr = s / 14 + (mood == BOP_WOW ? 1 : 0);
-  bop_disc(sx + s / 15, sy - s / 5, tr + w, ink);
-  bop_disc(sx + s / 15, sy - s / 5, tr, tip);
-  /* body */
+  int tr = s / 16 + (mood == BOP_WOW ? 1 : 0), tw = w > 2 ? 2 : w; /* the ball, on top of the stem */
+  int ty = sy - s / 5 - tr - tw + 1;
+  bop_disc(sx + s / 15, ty, tr + tw, ink);
+  bop_disc(sx + s / 15, ty, tr, tip);
+  /* head */
   bop_round(bx, by, bw, bh, s / 7, body, ink, w);
-  /* eyes: a ring with a pupil at every size (the app's Bop), wider when surprised */
-  int ey = by + bh * 2 / 5, ex0 = bx + bw * 3 / 10, ex1 = bx + bw * 7 / 10;
+  /* eyes: a ring with a pupil at every size, wider when surprised */
+  int ey = by + bh / 3, ex0 = bx + bw * 3 / 10, ex1 = bx + bw - 1 - bw * 3 / 10;
   int er = s / 10;
   if (er < 5) {
     er = 5;
   }
-  if (mood == BOP_WOW) {
-    er += er / 3;
+  if (mood == BOP_WOW && s >= 70) {
+    er += er / 4; /* wider when surprised (at small sizes the "o" mouth says it) */
   }
   int ew = s >= 70 ? w : 2;
   int pp = s >= 70 ? 4 : 2; /* the pupil, square */
@@ -97,9 +99,10 @@ static void bop_draw_ex(int x, int y, int s, int mood, int lift, int look, int b
     }
   }
   /* mouth: a line, an "o" (wow), a smile (happy), a small line (sleepy) */
-  int my = by + bh * 3 / 4, mx = bx + bw / 2;
+  int my = by + bh * 4 / 5 - w / 2, mx = bx + bw / 2;
   if (mood == BOP_WOW) {
-    bop_ring(mx, my, s / 16 + w, w, ink, body);
+    int ow = w > 2 ? 2 : w;
+    bop_ring(mx, my - 1, s / 20 + ow, ow, ink, body);
   } else if (mood == BOP_HAPPY) {
     int r = s / 9;
     for (int a = 0; a <= r; a++) { /* a shallow U */
@@ -112,10 +115,16 @@ static void bop_draw_ex(int x, int y, int s, int mood, int lift, int look, int b
   } else {
     rect(mx - s / 10, my, s / 5, w, ink);
   }
-  /* feet: two pills, as the app's */
-  int fy = by + bh + 1 + lift, fw = s / 5 + 1, fh = s / 10 > 4 ? s / 10 : 4;
-  bop_pill(x + s / 2 - s / 5 - fw / 2, fy, fw, fh, body, ink);
-  bop_pill(x + s / 2 + s / 5 - fw / 2, fy, fw, fh, body, ink);
+  /* feet: two pills, 2.5 times as wide as tall, under the head's quarters */
+  int fh = (s / 9) | 1, fy = by + bh + 1 + lift;
+  if (fh < 5) {
+    fh = 5;
+  }
+  int fw = (fh * 5 + 1) / 2, fl = (fh - 1) / 2 - 1;
+  fl = fl < 2 ? 2 : fl > w ? w : fl;
+  int fx = bx + bw / 4 - fw / 2;
+  bop_pill(fx, fy, fw, fh, body, ink, fl);
+  bop_pill(2 * bx + bw - fx - fw, fy, fw, fh, body, ink, fl); /* its mirror */
 }
 
 static void bop_draw(int x, int y, int s, int mood, int lift, uint16_t bg, uint16_t ink, uint16_t body, uint16_t tip) {

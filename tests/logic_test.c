@@ -34,22 +34,25 @@ static void chord(int a, int b, int c, int d, int e, int bass, const char* want)
 int main(void) {
   chord(0, 7, -1, -1, -1, 0, "C5");
   chord(0, 4, 7, -1, -1, 0, "C");
-  chord(0, 3, 7, -1, -1, 0, "CMIN");
-  chord(2, 5, 9, -1, -1, 2, "DMIN");
-  chord(0, 4, 7, 11, -1, 0, "CMAJ7");
+  chord(0, 3, 7, -1, -1, 0, "Cm");
+  chord(2, 5, 9, -1, -1, 2, "Dm");
+  chord(0, 4, 7, 11, -1, 0, "Cmaj7");
   chord(0, 4, 7, 10, -1, 0, "C7");
-  chord(0, 3, 7, 10, -1, 0, "CMIN7");
+  chord(0, 3, 7, 10, -1, 0, "Cm7");
   chord(4, 7, 0, -1, -1, 4, "C/E");
   chord(7, 11, 2, 5, -1, 7, "G7");     /* G B D F: the bass is the root */
-  chord(0, 4, 7, 11, 2, 4, "CMAJ9/E"); /* the same chord over E: a slash */
-  chord(0, 2, 7, -1, -1, 0, "CSUS2");
-  chord(0, 5, 7, -1, -1, 0, "CSUS4");
-  chord(0, 4, 8, -1, -1, 0, "CAUG");
-  chord(0, 3, 6, 10, -1, 0, "CMIN7B5");
-  chord(0, 3, 6, 9, -1, 0, "CDIM7");
-  chord(9, 0, 4, 7, -1, 9, "AMIN7");
+  chord(0, 4, 7, 11, 2, 4, "Cmaj9/E"); /* the same chord over E: a slash */
+  chord(0, 2, 7, -1, -1, 0, "Csus2");
+  chord(0, 5, 7, -1, -1, 0, "Csus4");
+  chord(0, 4, 8, -1, -1, 0, "Caug");
+  chord(0, 3, 6, 10, -1, 0, "Cm7b5");
+  chord(0, 3, 6, 9, -1, 0, "Cdim7");
+  chord(9, 0, 4, 7, -1, 9, "Am7");
   chord(9, -1, -1, -1, -1, 9, "A");
   chord(0, 1, 4, -1, -1, 0, "?");
+  chord(1, 4, 7, 11, -1, 6, "C#m7b5/F#"); /* the app's spelling (PASS3 item 8) */
+  chord(3, 7, 10, -1, -1, 3, "Eb");
+  chord(10, 2, 5, -1, -1, 10, "Bb");
   {
     char b[8] = "x";
     eqi("empty chord", chord_name(0, -1, b, sizeof b), 0);

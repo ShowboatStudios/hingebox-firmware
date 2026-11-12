@@ -45,8 +45,10 @@ static const uint16_t* aa_hc_lut(const uint8_t* hc, int slot) {
   return aa_lut[slot];
 }
 
+static int32_t aa_glyph_at(const aafont_t* f, uint32_t ch);
+/* a face without lowercase draws it as capitals, except the letters it carries as extras (tools/aa_extend.py) */
 static inline uint32_t aa_fold(const aafont_t* f, uint32_t c) {
-  return c >= 'a' && c <= 'z' && f->last < 'a' ? c - 32u : c;
+  return c >= 'a' && c <= 'z' && f->last < 'a' && aa_glyph_at(f, c) < 0 ? c - 32u : c;
 }
 static int32_t aa_glyph_at(const aafont_t* f, uint32_t ch) {
   uint32_t i;
@@ -62,9 +64,7 @@ static int32_t aa_glyph_at(const aafont_t* f, uint32_t ch) {
 }
 static uint32_t aa_glyph(const aafont_t* f, uint32_t ch) {
   int32_t k;
-  if (ch >= 'a' && ch <= 'z' && f->last < 'a') {
-    ch -= 32u;
-  }
+  ch = aa_fold(f, ch);
   if ((k = aa_glyph_at(f, ch)) < 0 && (k = aa_glyph_at(f, '?')) < 0) {
     k = 0;
   }

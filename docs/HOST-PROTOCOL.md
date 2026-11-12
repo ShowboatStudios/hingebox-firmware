@@ -47,7 +47,7 @@ Host colours live in RAM only: streaming a playhead never writes flash.
 | Message | Meaning |
 |---|---|
 | CC 104, index | the track's colour (slot 1's swatch and name): 0 kick orange, 1 snare blue, 2 clap pink, 3 hat yellow, 4 open green, 5 tom lilac, 6 perc white, 7 bass green; 127 = default (orange) |
-| CC 106, index | the knob's colour, same indices; send it before CC 107. It stays until changed (127 = orange) |
+| CC 106, index | the knob's colour, same indices; send it before CC 107. It stays until the knob's name changes (127 = orange). A name with no CC 106 gets the deck knob's colour by name (reverb white, swing / delay green, drive blue, ...), else orange |
 | CC 105, moment | a moment for Bop: 1 fill, 2 drop (surprised), 3 cheer (happy), for 1.5 s; 0 nothing |
 
 Pads sent in the deck's track hues (velocity 10, 80, 115, 22, 48, 95, 64; 20 fill, 3 drop: Hingebox's
