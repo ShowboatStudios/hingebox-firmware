@@ -312,7 +312,8 @@ static uint8_t d_chord = 1, d_notes = 1, d_pills = 1, d_foot = 1, d_head = 1, d_
 /* the knob overlay (screen v3): a control's name, its value and a bar for 1.5 s. Local controls name themselves
  * (ctl_name, set just before they send); with Hingebox connected the app names them (CC 107) instead */
 static char ov_name[17], ov_sub[16];
-static uint8_t ov_val, ov_pct, d_ov = 1;
+static uint8_t ov_val, ov_pct, d_ov = 1; /* ov_pct: 0 the raw value, 1 a percentage, 2 centred (the name says it) */
+static uint8_t hb_centre; /* CC 103: the next overlay is a centred part fader */
 static uint16_t ov_col = C_ACC;
 static uint32_t ov_at;
 static const char* ctl_name;
@@ -532,6 +533,7 @@ static void hb_cc(uint8_t cc, uint8_t v) {
       }
       if (hb_slot == 2) {
         hb_knob_col = 255; /* a new knob: its colour comes next (CC 106) or from its name */
+        hb_centre = 0;
       }
       d_host = 1;
       break;
@@ -544,13 +546,16 @@ static void hb_cc(uint8_t cc, uint8_t v) {
       }
       ov_sub[0] = 0;
       ov_val = v;
-      ov_pct = 1;
+      ov_pct = hb_centre ? 2 : 1;
       if (hb_knob_col >= 8) { /* no CC 106 for this knob: its deck colour by name, else orange */
         hb_knob_col = knob_colour_of(ov_name);
       }
       ov_col = deck_colour(hb_knob_col);
       ov_at = millis() ? millis() : 1;
       d_ov = 1;
+      break;
+    case 103: /* screen v3: the knob in slot 2 is a part fader, neutral in the middle (its name carries the dB) */
+      hb_centre = v ? 1 : 0;
       break;
     case 106:
       hb_knob_col = v < 8 ? v : 0; /* 127: the default, orange (the kick's) */
@@ -1446,7 +1451,9 @@ static void draw_overlay(void) {
   rect(0, y0, SCREEN_W, h, C_BG);
   char v[8];
   format_int(v, ov_pct ? ov_val * 100 / 127 : ov_val);
-  if (ov_pct) {
+  if (ov_pct == 2) {
+    v[0] = 0;
+  } else if (ov_pct) {
     int n = str_len(v);
     v[n] = '%', v[n + 1] = 0;
   }
@@ -1460,9 +1467,15 @@ static void draw_overlay(void) {
   }
   int by = y0 + 48, bw = SCREEN_W - 2 * MX;
   rect(MX, by, bw, 16, C_CARD);
-  rect(MX, by, ov_val * bw / 127, 16, ov_col);
-  for (int q = 1; q < 4; q++) {
-    rect(MX + bw * q / 4, by, 1, 16, C_BG);
+  if (ov_pct == 2) { /* lit from the middle, with the detent */
+    int mid = bw / 2, at = ov_val * bw / 127;
+    rect(MX + (at < mid ? at : mid), by, at < mid ? mid - at : at - mid, 16, ov_col);
+    rect(MX + mid - 1, by - 3, 2, 22, C_TXT);
+  } else {
+    rect(MX, by, ov_val * bw / 127, 16, ov_col);
+    for (int q = 1; q < 4; q++) {
+      rect(MX + bw * q / 4, by, 1, 16, C_BG);
+    }
   }
   if (ov_sub[0]) {
     mono(MX, by + 22, ov_sub, C_MUT);
