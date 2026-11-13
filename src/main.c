@@ -2613,8 +2613,12 @@ void loop(void) {
         continue;
       }
       int v = knob_val[slot] + d;
-      v = v < 0 ? 0 : v > 127 ? 127
-                              : v;
+      if (hb_active()) {
+        v &= 127; /* Hingebox reads the knobs as endless: it wraps round, so a knob never sticks at an end */
+      } else {
+        v = v < 0 ? 0 : v > 127 ? 127
+                                : v;
+      }
       if (v != knob_val[slot]) {
         knob_val[slot] = (uint8_t)v;
         send_map(m, knob_val[slot], 1);
