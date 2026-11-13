@@ -11,6 +11,10 @@
  *                                           fm1_audio_ack_half(); }
  *   fm1_audio_stop()      DMA off (crash screen, UBOOT): no looping buzz
  *   fm1_audio_resume()    DMA on again after fm1_audio_stop (the Bluetooth radio's start-up)
+ * Split, for an engine that starts later (fm1.c FOMA_AUDIO_GATE: only while the host streams over USB):
+ *   fm1_audio_attach(isr, prio)   at boot, IRQs off, before fm1_guard_lock_top (the vector table is locked after)
+ *   fm1_audio_start(buf, half_words)  the codec and ALNK0 bring-up of fm1_audio_init without the attach; from the
+ *                         main loop with IRQs on (it waits 2 x 5 ms)
  */
 #pragma once
 #include <stdint.h>
@@ -41,7 +45,7 @@ static void fm1__pc_out(uint32_t bit, int v)   /* codec control lines on PC0/1/2
     FM1_PR(FM1_PC, FM1_DIR) &= ~m;
 }
 
-FM1_INLINE void fm1_audio_init(int32_t *buf, uint32_t half_words, void (*isr)(void), uint32_t prio)
+FM1_INLINE void fm1__audio_bringup(int32_t *buf, uint32_t half_words, void (*isr)(void), uint32_t prio)
 {
     fm1__pc_out(6, 0);
     fm1_delay_ms(5);
@@ -69,11 +73,19 @@ FM1_INLINE void fm1_audio_init(int32_t *buf, uint32_t half_words, void (*isr)(vo
     fm1__pc_out(6, 1);
     FM1_ALNK_CON1 &= ~(1u << 15);
     FM1_ALNK_CON2 = 0x0Fu;
-    fm1_irq_attach(FM1_IRQ_ALNK0, isr, prio);
+    if (isr)
+        fm1_irq_attach(FM1_IRQ_ALNK0, isr, prio);
     FM1_ALNK_CON0 |= 0x800u;
     fm1_delay_ms(5);
     fm1__pc_out(6, 1);
 }
+
+FM1_INLINE void fm1_audio_init(int32_t *buf, uint32_t half_words, void (*isr)(void), uint32_t prio)
+{
+    fm1__audio_bringup(buf, half_words, isr, prio);
+}
+FM1_INLINE void fm1_audio_attach(void (*isr)(void), uint32_t prio) { fm1_irq_attach(FM1_IRQ_ALNK0, isr, prio); }
+FM1_INLINE void fm1_audio_start(int32_t *buf, uint32_t half_words) { fm1__audio_bringup(buf, half_words, 0, 0); }
 
 FM1_INLINE uint8_t fm1_audio_pending(void) { return FM1_ALNK_CON2; }
 FM1_INLINE void fm1_audio_ack_aux(uint8_t p)   /* the other three pendings */

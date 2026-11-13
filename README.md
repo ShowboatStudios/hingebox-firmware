@@ -15,11 +15,18 @@ the firmware to konsumer and the FOMA platform), with these changes:
   with the playhead; a mapped knob shows its Hingebox name and value.
 - The build refuses any package that would write the bootloader head, Bluetooth pairing/calibration or key_mac.
 
-**USB audio on the SMK-37 (2026-11-12, Elite, not working yet):** with `usb_audio` on, `audio()` passes the host's
-audio straight to the output (host-tested). On the keyboard, the app build doesn't finish enumerating on macOS (the
-device shows up, but no MIDI and no sound card), while the same build's OCT- rescue, where the audio engine never
-starts, enumerates as MIDI plus a 2-channel 44.1 kHz output. So the descriptors are fine and something at run time
-with the audio ISR running stalls enumeration. Keep `usb_audio` off for releases until that's found.
+**USB audio on the SMK-37 (branch `usb-audio`, 2026-11-13, Elite, awaiting a flash test):** with `usb_audio` on,
+`audio()` passes the host's audio straight to the output (host-tested). On 2026-11-12 the app build didn't finish
+enumerating on macOS (the device showed up, but no MIDI and no sound card), while the same build's OCT- rescue, where
+the audio engine never starts, enumerated as MIDI plus a 2-channel 44.1 kHz output. The fix makes the app enumerate
+the way the rescue does: with `FOMA_AUDIO_GATE` (firmware.json `"defines"`, 1 by default with `usb_audio`) boot only
+attaches the audio vector, and the codec / ALNK0 engine starts from the main loop once the host has held the
+streaming interface's alt setting 1 for 100 ms, and stops on alt 0, a bus reset, unconfigure or suspend
+(`platform/src/audio_gate.h`, tested in `tests/logic_test.c`). Test packages: `hingebox-smk37-elite-0.3.0-ua1.fwsc`
+(the fix: try first), `-ua2` (the same, plus the whole USB poll runs inside a render, `FOMA_USB_NESTED_POLL`), `-ua3`
+(diagnostic: the engine never starts, so no sound; if this one won't enumerate either, the audio engine isn't the
+cause). If a build doesn't enumerate, hold OCT- while switching on (the rescue) and install 0.2.0 again. Keep
+`usb_audio` off for releases until one of them passes on the keyboard.
 
 **Host protocol (channel 16 CCs; SysEx belongs to the updater on this platform):** 119 hello → we answer 119 = 1
 (protocol), 118 = capabilities (1 pad lights, 2 screen, 4 buttons), 117 = version (2 = 0.2). 113 playhead 0-15

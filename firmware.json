@@ -1,12 +1,16 @@
 {
   "name": "HINGEBOX",
-  "version": "0.2.0",
+  "version": "0.3.0-ua1",
   "identity": "FM-1_95",
   "product": "FM-1_957",
   "options": {
-    "usb_audio": false,
+    "usb_audio": true,
     "trs_midi": false,
     "midi_clock": false,
     "bluetooth": true
+  },
+  "defines": {
+    "FOMA_AUDIO_GATE": 1,
+    "FOMA_USB_NESTED_POLL": 0
   }
 }

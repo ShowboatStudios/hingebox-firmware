@@ -61,6 +61,23 @@ static volatile uint8_t in_audio;   /* the audio interrupt is running */
 #define MIDI_RT(status, source) clock_in(status, source, fm1_ticks()) /* clock and transport: the helper's */
 #endif
 #include "usb.c"
+/* FOMA_AUDIO_GATE (usb_audio only): 0 the audio engine runs from boot (the FM-1's synths); 1 it runs only while the
+ * host streams to us (src/audio_gate.h: the SMK-37 enumerated as MIDI + audio only with no engine running); 2 never
+ * (diagnostic: the host's audio is taken and dropped). FOMA_USB_NESTED_POLL 1: TIMER5 nested in a render runs the
+ * whole USB poll, not only the audio stream (EP0 never waits for a render to end). */
+#if !FOMA_USB_AUDIO
+#undef FOMA_AUDIO_GATE
+#define FOMA_AUDIO_GATE 0
+#endif
+#ifndef FOMA_AUDIO_GATE
+#define FOMA_AUDIO_GATE 1
+#endif
+#ifndef FOMA_USB_NESTED_POLL
+#define FOMA_USB_NESTED_POLL 0
+#endif
+#if FOMA_AUDIO_GATE
+#include "audio_gate.h"
+#endif
 #if FOMA_TRS_MIDI
 #include "midi_uart.c"
 #endif
@@ -533,7 +550,12 @@ void fm1_timer5_irq(void) {
     sub = 0;
   }
   if (in_audio) { /* (the audio from the host keeps coming, and a clock on the TRS jack keeps its time) */
-#if FOMA_USB_AUDIO
+#if FOMA_USB_AUDIO && FOMA_USB_NESTED_POLL
+    if (owed) { /* all of USB (the audio ISR never touches the SIE; the rings are single-producer) */
+      usb_poll();
+      owed = 0;
+    }
+#elif FOMA_USB_AUDIO
     if (usb_due) {
       uo_service();
     }
@@ -604,16 +626,55 @@ void fm1_alnk0_irq(void) { /* via isr_alnk0 (hal/fm1_isr.S) */
   in_audio = 0;
 }
 extern void isr_alnk0(void);
+
+/* the engine on or off (FOMA_AUDIO_GATE: from the main loop as the host starts and stops streaming; the radio's
+ * start-up holds it off meanwhile) */
+static uint8_t au_running = !FOMA_AUDIO_GATE, au_hw = !FOMA_AUDIO_GATE, au_bt_hold;
+static void audio_engine(int on) {
+  if (!on || au_bt_hold) {
+    if (au_hw) { /* (never brought up: nothing to stop) */
+      fm1_audio_stop();
+    }
+    return;
+  }
+  for (uint32_t i = 0; i < 2u * HALF_WORDS; i++) {
+    abuf[i] = 0;
+  }
+#if FOMA_AUDIO_GATE
+  if (!au_hw) { /* the first time: the codec and ALNK0 bring-up, which boot left out (IRQs on: USB keeps polling) */
+    au_hw = 1;
+    fm1_audio_start(abuf, HALF_WORDS);
+    return;
+  }
+#endif
+  fm1_audio_resume();
+}
+#if FOMA_AUDIO_GATE
+static audio_gate_t au_gate;
+static void audio_gate_poll(void) {
+#if FOMA_AUDIO_GATE == 1
+  int want = usb_audio_streaming();
+#else
+  int want = 0;
+#endif
+  switch (audio_gate_step(&au_gate, want, fm1_ms)) {
+  case AG_START:
+    au_running = 1;
+    audio_engine(1);
+    break;
+  case AG_STOP:
+    au_running = 0;
+    audio_engine(0);
+    break;
+  default:
+    break;
+  }
+}
+#endif
 #if FOMA_BLUETOOTH
 static void bt_audio_hold(int hold) { /* bt.c: around the radio's start-up, a short silence */
-  if (hold) {
-    fm1_audio_stop();
-  } else {
-    for (uint32_t i = 0; i < 2u * HALF_WORDS; i++) {
-      abuf[i] = 0;
-    }
-    fm1_audio_resume();
-  }
+  au_bt_hold = (uint8_t)hold;
+  audio_engine(!hold && au_running);
 }
 #endif
 
@@ -623,6 +684,9 @@ static void platform_poll(void) {
   int32_t a;
   fm1_wdt_feed();
   usb_retry(fm1_ms);
+#if FOMA_AUDIO_GATE
+  audio_gate_poll();
+#endif
   ota_service();
   if (usb.ota_req) {
     usb.ota_req = 0;
@@ -723,7 +787,11 @@ void fm1_cstart(void) {
   smk_pad_events = 1; /* the app maps each pad itself: a hit is an event, not a note */
 #endif
   fm1_adc_init();
+#if FOMA_AUDIO_GATE
+  fm1_audio_attach(isr_alnk0, 3); /* the vector now (the table locks below); the engine once the host streams */
+#else
   fm1_audio_init(abuf, HALF_WORDS, isr_alnk0, 3); /* (abuf is zero: .bss) */
+#endif
   usb_start();
 #if FOMA_TRS_MIDI
   uart_midi_init();

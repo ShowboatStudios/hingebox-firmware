@@ -716,6 +716,12 @@ static void uo_service(void)
     sie_wr(S_RXCSR2, csr >> 8);
 }
 
+/* the main loop (fm1.c FOMA_AUDIO_GATE): the host streams to us now, so the audio engine may run */
+static int usb_audio_streaming(void)
+{
+    return usb.up && usb.config == 1u && uo.alt && !usb.suspended;
+}
+
 /* the audio ISR, once a render: n frames (Q15, L R) of what the host plays, resampled from the ring, into d.
  * The read step is 44.1 / 44.1176 kHz (Q16), steered by how far the fill at a render's start is from UO_TGT
  * (smoothed; +-2/65536 a frame of error, at most +-400). 0: nothing plays (d untouched) */

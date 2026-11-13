@@ -3,6 +3,7 @@
 #include <string.h>
 #include "chord.h"
 #include "mapping.h"
+#include "../platform/src/audio_gate.h"
 
 static int fails, checks;
 static void eq(const char* what, const char* got, const char* want) {
@@ -104,6 +105,25 @@ int main(void) {
   eqi("kind of pad 2", map_kind(map_of(CTL_PAD, 2)), CTL_PAD);
   eqi("kind of pedal", map_kind(N_MAP - 1), CTL_PEDAL);
 
+  { /* the USB audio gate (FOMA_AUDIO_GATE): no engine while the host enumerates or probes, on once it streams */
+    audio_gate_t g = {0};
+    uint32_t t = 1000;
+    eqi("gate idle", audio_gate_step(&g, 0, t), AG_NONE);
+    eqi("gate alt 1 seen", audio_gate_step(&g, 1, t), AG_NONE);
+    eqi("gate settling", audio_gate_step(&g, 1, t + AG_SETTLE_MS - 1), AG_NONE);
+    eqi("gate probe ends (alt 0)", audio_gate_step(&g, 0, t + AG_SETTLE_MS - 1), AG_NONE);
+    eqi("gate engine never ran", g.on, 0);
+    eqi("gate alt 1 again", audio_gate_step(&g, 1, t + 500), AG_NONE);
+    eqi("gate settle restarts", audio_gate_step(&g, 1, t + 500 + AG_SETTLE_MS - 1), AG_NONE);
+    eqi("gate starts", audio_gate_step(&g, 1, t + 500 + AG_SETTLE_MS), AG_START);
+    eqi("gate runs", audio_gate_step(&g, 1, t + 5000), AG_NONE);
+    eqi("gate stops on alt 0", audio_gate_step(&g, 0, t + 5001), AG_STOP);
+    eqi("gate stays off", audio_gate_step(&g, 0, t + 5002), AG_NONE);
+    g = (audio_gate_t){0};
+    t = 0xFFFFFFF0u; /* the ms count wrapping */
+    audio_gate_step(&g, 1, t);
+    eqi("gate across the wrap", audio_gate_step(&g, 1, t + AG_SETTLE_MS), AG_START);
+  }
   printf(fails ? "%d of %d checks FAILED\n" : "%d checks, all good\n", fails ? fails : checks, checks);
   return fails != 0;
 }

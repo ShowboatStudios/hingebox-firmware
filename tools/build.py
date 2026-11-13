@@ -96,6 +96,12 @@ def config():
   if bad:
     raise BuildError(f"firmware.json: unknown option {', '.join(bad)} (there are: {', '.join(OPTIONS)})")
   on = {k: bool(opts.get(k, True)) for k in OPTIONS}
+  # firmware.json "defines": platform tuning knobs, as -DNAME=int (FOMA_ names only, e.g. FOMA_AUDIO_GATE)
+  defs = c.get("defines", {})
+  for k, v in defs.items():
+    if not re.fullmatch(r"FOMA_[A-Z0-9_]+", k) or k in OPTIONS.values() or type(v) is not int:
+      raise BuildError(f'firmware.json: "defines" {k}: a FOMA_ name (not an option) with an integer value')
+  c["extra_defines"] = [f"-D{k}={v}" for k, v in sorted(defs.items())]
   if not on["bluetooth"]:
     print("warning: bluetooth is off: this firmware's BLE MIDI output will not be in the build", file=sys.stderr)
   minor = int(m[2]) % 10
@@ -374,7 +380,7 @@ def build_target(cfg, board, model="pro"):
 
 def build():
   cfg = config()
-  cfg["defines"] = [f"-D{OPTIONS[k]}={int(cfg['on'][k])}" for k in OPTIONS]
+  cfg["defines"] = [f"-D{OPTIONS[k]}={int(cfg['on'][k])}" for k in OPTIONS] + cfg["extra_defines"]
   targets = [("fm1", "pro")] + [("smk37", m) for m in MODELS]
   print(f'{cfg["name"]} {cfg["version"]}: {len(targets)} packages')
   failed = 0
